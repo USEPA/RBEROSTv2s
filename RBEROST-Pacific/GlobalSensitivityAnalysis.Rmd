@@ -1,0 +1,3919 @@
+---
+title: "Global Sensitivity Analysis - Puget Sound"
+author: "Cathy Chamberlin, Kelly-Anne Moffa"
+date: "3/8/2021"
+output: pdf_document
+---
+### Editted 8/12/2021 to reflect new structure of RBEROST and use the code written in the uncertainty analysis section.
+### Editted 6/20/2024 to reflect Puget Sound structure of RBEROST.
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <- c(
+  "data.table", "tidyverse", "foreach", "nhdplusTools", "sf", "doParallel", "rneos"
+)
+suppressPackageStartupMessages(lapply(packages, library, character.only = TRUE))
+
+theme_set(theme_classic())
+registerDoParallel()
+
+options(RCurlOptions = list(ssl.verifypeer = FALSE))
+
+my_NgetSolverTemplate <- function (
+  category, solvername, inputMethod, nc = CreateNeosComm()
+) {
+  if (!(class(nc) == "NeosComm")) {
+    stop("\nObject provided for 'nc' must be of class 'NeosComm'.\n")
+  }
+  
+  call <- match.call()
+  
+  ans <- xml.rpc(
+    url = nc@url, 
+    method = "getSolverTemplate", 
+    .args = list(
+      category = category, solvername = solvername, inputMethod = inputMethod
+    ), 
+    .convert = TRUE, 
+    .opts = nc@curlopts, 
+    .curl = nc@curlhandle
+  )
+  
+  email.xmlcode <- "\n\n<email><![CDATA[...Insert Value Here...]]></email>"
+  
+  ans_rev <- if(
+    grepl("email", ans)
+  ) {
+    ans
+  } else {
+    paste0(
+      substr(ans, 1, nchar(ans)-13), 
+      email.xmlcode, 
+      substr(ans, (nchar(ans)-13), nchar(ans))
+    )
+  }
+  
+  xml <- xmlRoot(xmlTreeParse(ans_rev, asText = TRUE))
+  
+  res <- new("NeosXml", xml = xml, method = "getSolverTemplate",
+             call = call, nc = nc)
+  
+  return(res)
+}
+
+```
+
+## Set Filepath locations
+```{r set filepaths}
+InPath <- paste0("./Preprocessing/Inputs/")
+AMPLscriptsfolder <- "./Preprocessing/Outputs/"
+Sens_scriptsfolder <- "./SensitivityAnalysis/AMPLscripts/"
+NEOSresults <- "./SensitivityAnalysis/NEOSResults/"
+figureoutputs <- "./SensitivityAnalysis/"
+```
+
+
+## Check the UserSpecs settings
+```{r identify global sens scenario}
+default_parameters <-TRUE # TRUE or FALSE. TRUE indicates the unconstrained model.
+
+parameter_tag <- "" # a character string that will be appended to the end of the sensitivity AMPL files for reference. If running default parameters, can put an empty string ("")
+
+nbootstraps <- 1000
+```
+
+
+## Source RBEROST Preprocessor - might replace this with reference files?
+```{r source RBEROST}
+
+# This variable represents the location of input data files used to develop AMPL model files. If you opened RBEROST through the Tier_1_Optimization-SSWR_5_3_2.Rproj file, the '.' represents the folder where the Tier_1_Optimization-SSWR_5_3_2.Rproj file is located. If you did not open this file through the R project you may need to write out the full path to your RBEROST inputs.
+InPath<-paste0("./Preprocessing/Inputs/")
+
+# This variable represents the location where AMPL model files will be printed for use on the NEOS server. If you opened RBEROST through the Tier_1_Optimization-SSWR_5_3_2.Rproj file, the '.' represents the folder where the Tier_1_Optimization-SSWR_5_3_2.Rproj file is located. If you did not open this file through the R project you may need to write out the full path to your RBEROST inputs.
+OutPath<-paste0("./Preprocessing/Outputs/")
+
+# This variable represents the planning horizon in terms of years. Default is 15.
+horizon <- 15
+
+# This variable represents to expected interest rate. Default is 0.03, or 3%.
+interest_rate <- 0.03
+
+# This variable lets the user decide if they wish to consider agricultural BMP efficiencies of practices versus "No Practice" (a default of no conservation practices) or "Baseline" (a default of practices currently in place, and implementing a BMP will remove practices currently in place).
+AgBMPcomparison <- "No Practice"
+
+# This variable decides if you will run RBEROST with or without uncertainty. It can be TRUE or FALSE. Running with uncertainty takes longer than running without.
+IncludeUncertainty <- TRUE
+
+# If running RBEROST with uncertainty, how many scenarios would you like to view? Default is 3.
+n.scenarios <- 3 
+
+# If running RBEROST with uncertainty, how different would you like the scenarios to be? Each scenario will be solved for loading limits that are a certain percentage lower than the previous. Default is 0.01, or 1%.
+scenariostepchange <- 0.01
+
+# ----- Do not change anything below this line -------
+
+source("./R/01_Optimization_Preprocessing_gateway.R", local = TRUE)
+```
+
+## Source other code **might not need this for PS**
+``` {r source other data}
+
+#source("./R/00_ProcessHSGdata.R")
+
+#dat.rds <- read.csv("./Data/ptbldftprntvspthria.csv") # Data from N. Detenbeck, using VT high resolution landcover imagery
+```
+## Calculate Additional Bounds for Sensitivity
+```{r additional calculations}
+### Calculate sums of loads for optimization
+
+if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+  param_loads_lim_tn_low <- unlist(
+    foreach(i = 1:length(temp_inc_tn_dat)) %do% {
+      
+      (1 - 0.2) * sum(
+        temp_inc_tn_dat[[i]][ , c("in_poin", "in_urb", "in_road", "in_ag", "in_graz", "in_other")]
+      )
+    }
+  )
+  param_loads_lim_tn_high <- unlist(
+    foreach(i = 1:length(temp_inc_tn_dat)) %do% {
+      
+      (1 - 0.02) * sum(
+        temp_inc_tn_dat[[i]][ , c("in_poin", "in_urb", "in_road", "in_ag", "in_graz", "in_other")]
+      )
+    }
+  )
+}
+
+if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+  param_loads_lim_tp_low <- unlist(
+    foreach(i = 1:length(temp_inc_tp_dat)) %do% {
+      
+      (1 - 0.2) * sum(
+        temp_inc_tp_dat[[i]][ , c("ip_poin", "ip_urb", "ip_ag", "ip_graz", "ip_other", "ip_road")]
+      )
+    }
+  )
+  param_loads_lim_tp_high <- unlist(
+    foreach(i = 1:length(temp_inc_tp_dat)) %do% {
+      
+      (1 - 0.02) * sum(
+        temp_inc_tp_dat[[i]][ , c("ip_poin", "ip_urb", "ip_ag", "ip_graz", "ip_other", "ip_road")]
+      )
+    }
+  )
+}
+
+# HSGD_area <- dat.hsgvariability %>%
+#   filter(HSG == "D", source == "NATSGO") %>%
+#   mutate(
+#     HSGDpctarea = mean(area_resample),
+#     HSGDpctarea_se = sd(area_resample) / sqrt(10)
+#   )  %>%
+#   ungroup() %>%
+#   select(comid, HSGDpctarea, HSGDpctarea_se)
+
+# Get uncertainty in the percent of impervious area that is roads
+
+# dat.rds.edit <- dat.rds %>% filter(ptbfarea < 30) # eliminates one outlier
+
+# can view the following ggplot to see the fit of building footprint to percent impervious area
+
+# ggplot(dat.rds.edit, aes(x = ptHRIAarea, y = ptbfarea)) + 
+#   geom_point() + 
+#   labs(
+#     x = "High Resolution Impervious Area (% catchment)", 
+#     y = "Building Footprint Area (% catchment)"
+#   ) +
+#   geom_smooth(method = "lm")
+
+# percentbuilding_perimparea <- (with(dat.rds.edit, lm(ptbfarea ~ ptHRIAarea))) # model the relationship
+# 
+# error.pctroad <- summary(percentbuilding_perimparea)$coefficients["ptHRIAarea","Std. Error"] # The standard error of the slope refers to the standard error of building footprint when modeling it from impervious surface area. We are assuming that the footprint of roads and parking lots is 1 - the footprint of buildings. Therefore the standard error is the same. 
+
+# Make matrix of implementability of each urban BMP for each comid's impervious land
+# HSG D comids cannot have infiltration-based BMPs
+# Porous Pavement can only be implemented on 10% of impervious land.
+
+# urban_bmp_implementationpotential_dat_se <- setNames(
+#   data.frame(
+#     matrix(
+#       ncol = length(Urban_BMPs) * 2 + 1, 
+#       nrow = length(streamcat_subset_all$comid)
+#     )
+#   ), 
+#   c("comid", Urban_BMPs, paste0(Urban_BMPs, "_se"))
+# ) %>%
+#   mutate(
+#     comid = streamcat_subset_all$comid,
+#     comid_form = paste0("'", comid, "'")
+#   ) %>%
+#   left_join(., comid.infiltrationrates.matched, by = "comid") %>%
+#   left_join(., HSGD_area, by = "comid") %>%
+#   mutate(
+#     HSGDpctarea = replace_na(HSGDpctarea, 0),
+#     HSGDpctarea_ster = HSGDpctarea_se
+#   ) %>%
+#   fill(HSGDpctarea_ster, .direction = "downup") %>%
+#   mutate(
+#     across(
+#       .cols = all_of(Urban_BMPs), 
+#       .fns = ~case_when(
+#         cur_column() %in% c(
+#           "Biofiltration_w_Underdrain", 
+#           "Bioretention_Basin", 
+#           "Enhanced_Biofiltration_w_ISR", 
+#           "Extended_Dry_Detention_Basin", 
+#           "Grass_Swale_w_detention", 
+#           "Gravel_Wetland", 
+#           "Sand_Filter_w_underdrain", 
+#           "Wet_Pond"
+#         ) ~ 
+#           1, 
+#         cur_column() == "Porous_Pavement_w_underdrain" ~ 0.1,
+#         cur_column() %in% c(
+#           "Infiltration_Basin", "Infiltration_Chamber", "Infiltration_Trench"
+#         ) ~ case_when(
+#           InfiltrationRate_inperhr <= 0.12 ~ 0, 
+#           InfiltrationRate_inperhr >= 0.12 ~ 1,
+#           is.na(InfiltrationRate_inperhr) ~ 0
+#         ),
+#         cur_column() == "Porous_Pavement_w_subsurface_infiltration" ~ case_when(
+#           InfiltrationRate_inperhr <= 0.12 ~ 0,
+#           InfiltrationRate_inperhr >= 0.12 ~ 0.1,
+#           is.na(InfiltrationRate_inperhr) ~ 0
+#         )
+#       )
+#     ),
+#     HSGareacorrection = case_when(
+#       InfiltrationRate_inperhr <= 0.12 ~ (1 - HSGDpctarea), 
+#       InfiltrationRate_inperhr >= 0.12 ~ HSGDpctarea,
+#       is.na(InfiltrationRate_inperhr) ~ 0
+#     )
+#   ) %>%
+#   rowwise() %>%
+#   mutate(
+#     across(
+#       .cols = contains("_se"), 
+#       .fns = ~case_when(
+#         gsub(cur_column(), pattern = "_se", replacement = "") %in% c(
+#           "Biofiltration_w_Underdrain", 
+#           "Bioretention_Basin", 
+#           "Enhanced_Biofiltration_w_ISR", 
+#           "Extended_Dry_Detention_Basin", 
+#           "Grass_Swale_w_detention", 
+#           "Gravel_Wetland", 
+#           "Sand_Filter_w_underdrain", 
+#           "Wet_Pond"
+#         ) ~ 
+#           0, 
+#         gsub(
+#           cur_column(), pattern = "_se", replacement = ""
+#         ) == "Porous_Pavement_w_underdrain" ~ 
+#           error.pctroad,
+#         gsub(
+#           cur_column(), pattern = "_se", replacement = ""
+#         ) %in% c(
+#           "Infiltration_Basin", "Infiltration_Chamber", "Infiltration_Trench"
+#         ) ~ my_propogateerror(
+#           vals = list(
+#             if(HSGDpctarea >0) {c(HSGDpctarea, HSGDpctarea_ster)} else {c(1, HSGDpctarea_ster)}, 
+#             c(1, HSGareacorrection)
+#           ),
+#           method = "mult"
+#         ),
+#         gsub(
+#           cur_column(), pattern = "_se", replacement = ""
+#         ) == "Porous_Pavement_w_subsurface_infiltration" ~ my_propogateerror(
+#           vals = list(
+#             if(HSGDpctarea >0) {c(HSGDpctarea, HSGDpctarea_ster)} else {c(1, HSGDpctarea_ster)}, 
+#             c(0.1, error.pctroad), 
+#             c(1, HSGareacorrection)
+#           ),
+#           method = "mult"
+#         )
+#       )
+#     )
+#   ) %>%  
+#   select(comid_form, contains(Urban_BMPs)) %>%
+#   fill(where(is.numeric), .direction = "downup")
+
+if(length(RiparianBuffer_BMPs) > 0) {
+  riparian_buffer_maximp_se <- foreach(
+    i = 1:length(RiparianBuffer_BMPs), .combine = "merge"
+  ) %do% {
+    RiparianBuffer_BMPs_tmp <- RiparianBuffer_BMPs[i]
+    
+    riparian.existingbuffer %>%
+      select(
+        comid, 
+        totalbanklength_ft, 
+        totalbanklength_ft_se,
+        contains(as.character(UserSpecs_bufferwidth_nearest[i]))
+      ) %>%
+      rename_with(
+        .fn = ~gsub(
+          paste0("_", UserSpecs_bufferwidth_nearest[i], "ft_ft"), '', .
+        ), 
+        .col = contains(as.character(UserSpecs_bufferwidth_nearest[i]))
+      ) %>%
+      rowwise %>%
+      mutate(
+        maximp = case_when(
+          RiparianBuffer_BMPs_tmp == "Forested_Buffer" ~ 
+            totalbanklength_ft - Forest_buffer,
+          RiparianBuffer_BMPs_tmp == "Grassed_Buffer" ~ 
+            totalbanklength_ft - Forest_buffer - Grass_buffer
+        ),
+        maximp_se = case_when(
+          RiparianBuffer_BMPs_tmp == "Forested_Buffer" ~ 
+            my_propogateerror(
+              vals = list(
+                c(totalbanklength_ft, totalbanklength_ft_se),
+                c(Forest_buffer, Forest_buffer_se)
+              ), 
+              method = "addsub"),
+          RiparianBuffer_BMPs_tmp == "Grassed_Buffer" ~ 
+            my_propogateerror(
+              vals = list(
+                c(totalbanklength_ft, totalbanklength_ft_se),
+                c(Forest_buffer, Forest_buffer_se),
+                c(Grass_buffer, Grass_buffer_se)
+              ), 
+              method = "addsub")
+        )
+      ) %>%
+      mutate(maximp = case_when(maximp < 0 ~ 0, maximp >= 0 ~ maximp)) %>%
+      select(comid, totalbanklength_ft_se, maximp_se) %>%
+      rename_with(.fn = ~paste(RiparianBuffer_BMPs_tmp), .cols = "maximp_se")
+  }
+}
+
+if(length(RiparianBuffer_BMPs) > 0) {
+  streambanklength_total_dat_se <- riparian_buffer_maximp_se %>% 
+    full_join(., streamcat_subset_all, by = "comid") %>%
+    filter(comid %in% streamcat_subset_all$comid) %>%
+    arrange(comid) %>%
+    mutate(
+      comid_form = paste0("'", comid, "'"), 
+      totalbanklength_ft = case_when(
+        is.na(totalbanklength_ft_se) ~ 0, 
+        !is.na(totalbanklength_ft_se) ~ totalbanklength_ft_se
+      )
+    ) %>%
+    select(comid_form, totalbanklength_ft)
+  
+  streambanklength_available_dat_se <-  riparian_buffer_maximp_se %>% 
+    full_join(., streamcat_subset_all, by = "comid") %>%
+    filter(comid %in% streamcat_subset_all$comid) %>%
+    arrange(comid) %>%
+    mutate(comid_form = paste0("'", comid, "'")) %>%
+    mutate(
+      across(
+        .cols = any_of(RiparianBuffer_BMPs), 
+        .fns = ~case_when(is.na(.) ~ 0, !is.na(.) ~ .)
+      )
+    ) %>%
+    select(comid_form, any_of(RiparianBuffer_BMPs))
+}
+```
+
+```{r free up memory}
+# This code removes some of the larger objects in order to speed up the following code
+rm(dat.hsgvariability)
+
+```
+## Write Global Sensitivity Command Script
+```{r write command script}
+# Write Command Script ####
+
+cat(
+  " 
+#WMOST Optimization Screening Tool AMPL command file
+
+set Bootstraps;",
+paste0(
+  "\nlet Bootstraps := 1 .. ", 
+  nbootstraps, 
+  " by 1;\n\ndisplay Bootstraps;\n\n"
+),
+"
+for {s in Bootstraps} {
+",
+file = paste(
+  AMPLscriptsfolder, "STcommand_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".amp", 
+  sep=""
+),
+sep = "\n"
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      cat(
+        paste0(
+          "\nlet loads_lim_N",
+          i,
+          "_rev := Uniform(",
+          param_loads_lim_tn_low[i],
+          ", ",
+          param_loads_lim_tn_high[i],
+          ");\nrepeat { \nlet other_loads_N", 
+          i, 
+          "_rev := Normal(other_loads_N", 
+          i, 
+          ", ", 
+          param_other_loads_tn[[i]]$se,
+          "); \n } until loads_lim_N",
+          i,
+          "_rev >= other_loads_N",
+          i,
+          "_rev >= 0;"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STcommand_globalsens", 
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".amp", 
+          sep=""
+        ),
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      cat(
+        paste0(
+          "\nlet loads_lim_P",
+          i,
+          "_rev := Uniform(",
+          param_loads_lim_tp_low[i],
+          ", ",
+          param_loads_lim_tp_high[i],
+          ");\nrepeat { \nlet other_loads_P", 
+          i, 
+          "_rev := Normal(other_loads_P", 
+          i, 
+          ", ", 
+          param_other_loads_tp[[i]]$se,
+          "); \n } until loads_lim_P",
+          i,
+          "_rev >= other_loads_P",
+          i,
+          "_rev >= 0;"
+        ),    
+        file = paste(
+          AMPLscriptsfolder, "STcommand_globalsens", 
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".amp", 
+          sep=""
+        ),
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+cat(
+  "
+	let agcost_frac_rev := Uniform(1,5/3);
+  repeat {
+	  for {a in ag_bmp} {
+	    let ag_frac_min_rev[a] := 0;
+	    let ag_frac_max_rev[a] := Uniform(0.7, 1); 
+	  };
+	} until sum {a in ag_bmp} ag_frac_min_rev[a] <= 1;
+	repeat {
+	for {b in ripbuf_bmp} {
+	  let ripbuf_frac_min_rev[b] := 0;
+	  let ripbuf_frac_max_rev[b] := Uniform(0.7, 1);
+	};
+	} until sum {b in ripbuf_bmp} ripbuf_frac_min_rev[b] <= 1;
+	repeat {
+	  for {u in urban_bmp} {
+	    let urban_frac_min_rev[u] := 0;
+	    let urban_frac_max_rev[u] := Uniform(0.7,1); 
+	} until sum {u in urban_bmp} urban_frac_min_rev[u] <= 1;
+	 ",    
+  file = paste(
+    AMPLscriptsfolder, "STcommand_globalsens", 
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".amp", 
+    sep=""
+  ),
+  sep = "", 
+  append = T
+)
+
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      cat(
+        paste0(
+          "\nfor {c in comid_N", 
+          i, 
+          "} {\nfor {l in loads_all} {\nrepeat {\nlet  baseloads_N", 
+          i, 
+          "_rev[c,l] := Normal(baseloads_N", 
+          i,
+          "[c,l], baseloads_N",
+          i,
+          "_se[c,l]);\n} until baseloads_N",
+          i,
+          "_rev[c,l] >= 0;\n};\nfor {b in ripbuf_bmp} {\nlet riparianremoval_N",
+          i,
+          "_rev[c,b] := Normal(riparianremoval_N",
+          i,
+          "[c,b], riparianremoval_N",
+          i,
+          "_se[c,r]);\n  };\nrepeat {\nlet riparianload_N",
+          i,
+          "_rev[c] := Normal(riparianload_N",
+          i,
+          "[c], riparianload_N",
+          i, 
+          "_se[c]); \n} until riparianload_N",
+          i, 
+          "_rev[c] >= 0;\n};"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STcommand_globalsens", 
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".amp", 
+          sep=""
+        ),
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+  cat(
+    "
+for {c in comid_all_N} {
+  for {a in ag_bmp} {
+    repeat {
+      let ag_effic_N_rev[c,a,s] := Normal(ag_effic_N[c,a], ag_effic_N_se[c,a]);
+    } until ag_effic_N_rev[c,a,s] <= 1;
+  };
+  for {g in graz_bmp} {
+    repeat {
+      let graz_effic_N_rev[c,g,s] := Normal(graz_effic_N[c,g], graz_effic_N_se[c,g]);
+    } until graz_effic_N_rev[c,g,s] <= 1;
+  };
+  for {p in point_bmp} {
+    let point_effic_N_rev[c,p,s] := Normal(point_effic_N[c,p], abs(point_effic_N_se[c,p]) * 0.2);
+  };
+};
+for {x in urban_comid_all_N, u in urban_bmp} {
+    repeat {
+      let urban_effic_N_rev[x,u,s] := Normal(urban_effic_N[x,u], urban_effic_N_se[x,u]);
+    } until urban_effic_N_rev[x,u,s] <= 1;
+  };
+for {h in road_comid_all_N, r in road_bmp} {
+    repeat {
+      let road_effic_N_rev[h,r,s] := Normal(road_effic_N[h,r], road_effic_N_se[h,r]);
+    } until road_effic_N_rev[h,r,s] <= 1;
+  }; 
+",    
+file = paste(
+  AMPLscriptsfolder, "STcommand_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".amp", 
+  sep=""
+),
+sep = "", 
+append = T
+  )
+}
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      cat(
+        paste0(
+          "\nfor {c in comid_P", 
+          i, 
+          "} {\nfor {l in loads_all} {\nrepeat {\nlet  baseloads_P", 
+          i, 
+          "_rev[c,l] := Normal(baseloads_P", 
+          i,
+          "[c,l], baseloads_P",
+          i,
+          "_se[c,l]);\n} until baseloads_P",
+          i,
+          "_rev[c,l] >= 0;\n};\nfor {b in ripbuf_bmp} {\nlet riparianremoval_P",
+          i,
+          "_rev[c,b] := Normal(riparianremoval_P",
+          i,
+          "[c,b], riparianremoval_P",
+          i,
+          "_se[c,b]);\n  };\nrepeat {\nlet riparianload_P",
+          i,
+          "_rev[c] := Normal(riparianload_P",
+          i,
+          "[c], riparianload_P",
+          i, 
+          "_se[c]); \n} until riparianload_P",
+          i, 
+          "_rev[c] >= 0;\n};"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STcommand_globalsens", 
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".amp", 
+          sep=""
+        ),
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+  cat(
+    "
+for {c in comid_all_P} {
+  for {a in ag_bmp} {
+    repeat {
+      let ag_effic_P_rev[c,a,s] := Normal(ag_effic_P[c,a], ag_effic_P_se[c,a]);
+    } until ag_effic_P_rev[c,a,s] <=1;
+  };
+  for {g in graz_bmp} {
+    repeat {
+      let graz_effic_P_rev[c,g,s] := Normal(graz_effic_P[c,g], graz_effic_P_se[c,g]);
+    } until graz_effic_P_rev[c,g,s] <=1;
+  };
+  for {p in point_bmp} {
+    let point_effic_P_rev[c,p,s] := Normal(point_effic_P[c,p], abs(point_effic_P_se[c,p]) * 0.2);
+  };
+};
+for {x in urban_comid_all_P, u in urban_bmp} {
+    repeat {
+      let urban_effic_P_rev[x,u,s] := Normal(urban_effic_P[x,u], urban_effic_P_se[x,u]);
+    } until urban_effic_P_rev[x,u,s] <= 1;
+  };
+for {h in road_comid_all_P, r in road_bmp} {
+    repeat {
+      let road_effic_P_rev[h,r,s] := Normal(road_effic_P[h,r], road_effic_P_se[h,r]);
+    } until road_effic_P_rev[h,r,s] <= 1;
+  };",
+file = paste(
+  AMPLscriptsfolder, "STcommand_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".amp", 
+  sep=""
+),
+sep = "\n",
+append = TRUE
+  )
+}
+
+cat(
+  "
+for {c in comid_all} {
+  	  for {u in urban_bmp} {
+	    repeat {
+	      let urban_bmp_implementationpotential_rev[c,u] :=  Normal(urban_bmp_implementationpotential[c,u], urban_bmp_implementationpotential_se[c,u]);
+	     } until 1 >= urban_bmp_implementationpotential_rev[c,u] >= 0;
+	  };
+  for {o in cost_type} {
+    repeat {
+      let point_costs_rev[c,o] := Normal(point_costs[c,o] * 1.15, point_costs[c,o] * 0.15);
+    } until point_costs_rev[c,o] >= 0;
+  };
+  
+  for {r in ripbuf_bmp} {
+  	 repeat {
+	      let unbuffered_banklength_rev[c,r] := Normal(unbuffered_banklength[c,r], unbuffered_banklength_se[c,r]);
+	     } until unbuffered_banklength_rev[c,r] >= 0;
+    repeat {
+      let ripbuf_costs_capital_rev[c,r] := Normal(ripbuf_costs_capital[c,r], ripbuf_costs_capital_se[c,r]);
+    } until ripbuf_costs_capital_rev[c,r] >= 0;
+    repeat { 
+      let ripbuf_costs_operations_rev[c,r] := Normal(ripbuf_costs_operations[c,r], ripbuf_costs_operations_se[c,r]);
+    } until ripbuf_costs_operations_rev[c,r] >= 0;
+  };
+  repeat {
+	    let total_banklength_rev[c] := Normal(total_banklength[c], 674.1);
+	   } until total_banklength_rev[c] >= max {r in ripbuf_bmp} unbuffered_banklength[c,r];
+  for {ar in area_sub} {
+    repeat {
+      let area_rev[c,ar] := Normal(area[c,ar], area_se[c,ar]);
+    } until area_rev[c,ar] >= 0;
+  };
+  
+  for {a in ag_bmp} {
+    repeat {
+      let ag_costs_capital_rev[c,a] := Normal(ag_costs_capital[c,a], ag_costs_capital_se[c,a]);
+    } until ag_costs_capital_rev[c,a] >= 0;
+    repeat {
+      let ag_costs_operations_rev[c,a] :=  Normal(ag_costs_operations[c,a], ag_costs_operations_se[c,a]);
+    } until ag_costs_operations_rev[c,a] >= 0;
+  };
+  
+  repeat {
+    let runoff_coeff_urban_rev[c,'urban'] := Normal(runoff_coeff_urban[c,'urban'], runoff_coeff_urban_se[c,'urban']);
+  } until 1 >= runoff_coeff_urban_rev[c,'urban'] >= 0;
+
+  repeat {
+    let urban_cost_adjustment_coef_rev[c] := Normal(urban_cost_adjustment_coef[c], urban_cost_adjustment_coef_se[c]);
+  } until urban_cost_adjustment_coef_rev[c] >= 0;
+  
+};
+
+solve;
+  option display_precision 10;
+  display solve_result_num, solve_result;
+  display cost.result;
+  display cost;
+  ",
+paste0(
+  "display ", 
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    paste(
+      foreach(i = 1:length(param_loads_lim_tn)) %do% {
+        paste0("loads_lim_N", i, "_rev")
+      },
+      collapse = ", "
+    )
+  }, 
+  if(
+    "TN" %in% user_specs_loadingtargets$TN_or_TP & 
+    "TP" %in% user_specs_loadingtargets$TN_or_TP
+  ) {paste(", ")},
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    paste(
+      foreach(i = 1:length(param_loads_lim_tp)) %do% {
+        paste0("loads_lim_P", i, "_rev")
+      },
+      collapse = ", "
+    )
+  },
+  ";"
+), 
+paste0(
+  "display ", 
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    paste(
+      foreach(i = 1:length(param_loads_lim_tn)) %do% {
+        paste0("other_loads_N", i, "_rev")
+      },
+      collapse = ", "
+    )
+  }, 
+  if(
+    "TN" %in% user_specs_loadingtargets$TN_or_TP & 
+    "TP" %in% user_specs_loadingtargets$TN_or_TP
+  ) {paste(", ")},
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    paste(
+      foreach(i = 1:length(param_loads_lim_tp)) %do% {
+        paste0("other_loads_P", i, "_rev")
+      },
+      collapse = ", "
+    )
+  },
+  ";"
+),
+"
+  display urban_frac_min_rev, urban_frac_max_rev;
+  display ag_frac_min_rev, ag_frac_max_rev;
+  display ripbuf_frac_min_rev, ripbuf_frac_max_rev;
+  display urban_design_depth_rev;
+  option display_1col 10000000000;
+  option display_width 100000000000;
+  option omit_zero_rows 1;
+  option omit_zero_cols 1;
+  display sum {c in comid_all} (ps_coef[c] * point_dec[c]);
+  display {u in urban_bmp} sum {c in comid_all} (urban_coef[c,u] * urban_frac[c,u]);
+  display {a in ag_bmp} sum {c in comid_all} (ag_coef[c,a] * ag_frac[c,a]);
+  display {r in ripbuf_bmp} sum {c in comid_all} (ripbuf_coef[c, r] * ripbuf_length[c, r]);
+
+};	
+",
+file = paste(
+  AMPLscriptsfolder, "STcommand_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".amp", 
+  sep=""
+),
+sep = "\n",
+append = TRUE
+)
+```
+
+## Write Global Sensitivity Model Script
+```{r write model script}
+
+
+write(
+  "#STmodel.mod
+      \nset comid_all :=", 
+  file = paste(
+    AMPLscriptsfolder, "STmodel_globalsens", 
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".mod", 
+    sep=""
+  )
+)
+cat(
+  "{",comid_vec_all,"};",
+  file = paste(
+    AMPLscriptsfolder, "STmodel_globalsens",  
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".mod", 
+    sep=""
+  ),  sep = "", append = T
+)
+cat("\n",   file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),   sep = "", append = T)
+
+if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+  cat(
+    paste0("\nset comid_all_N within comid_all := "),
+    file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  
+    sep = "",
+    append = T
+  )
+  cat(
+    "{",unique(comid_vec_all_N),"};",
+    file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  sep = "", append = T
+  )
+  cat(
+    "\n",   file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  sep = "", append = T
+  )
+}
+
+if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+  cat(
+    paste0("\nset comid_all_P within comid_all := "),
+    file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  
+    sep = "",
+    append = T
+  )
+  cat(
+    "{",unique(comid_vec_all_P),"};",
+    file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  sep = "", append = T
+  )
+  cat(
+    "\n",   file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  sep = "", append = T
+  )
+}
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(comid_vec_N)) %do% {
+      
+      cat(
+        paste0("\nset comid_N", i, " within comid_all_N := "),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "",
+        append = T
+      )
+      cat(
+        "{", comid_vec_N[[i]], "};",
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "",
+        append = T
+      )
+      cat(
+        "\n", 
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(comid_vec_P)) %do% {
+      
+      cat(
+        paste0("\nset comid_P", i, " within comid_all_P := "),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "",
+        append = T
+      )
+      cat(
+        "{", comid_vec_P[[i]], "};",
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "",
+        append = T
+      )
+      cat(
+        "\n",
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+cat(
+  "\n\nset urban_bmp :=",
+  file = paste(
+    AMPLscriptsfolder, "STmodel_globalsens",  
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".mod", 
+    sep=""
+  ),  
+  sep = "\n", 
+  append = T
+)
+if(length(Urban_BMPs) > 0) {
+  cat(
+    "{",bmp_urban_vec_comma,"};",
+    file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  
+    sep = "", 
+    append = T
+  ) 
+} else {
+  cat(
+    "{'none'};",
+    file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  
+    sep = "", 
+    append = T
+  ) 
+}
+
+
+cat(
+  "\n\nset urban_pervbmp within urban_bmp :=",
+  file = paste(
+    AMPLscriptsfolder, "STmodel_globalsens",  
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".mod", 
+    sep=""
+  ),  
+  sep = "\n", 
+  append = T
+)
+if(length(Urban_BMPs) > 0) {
+  if(!grepl("''", paste0(pervbmp_urban_vec_comma, collapse = ""))) {
+    cat(
+      "{",pervbmp_urban_vec_comma,"};",
+      file = paste(
+        AMPLscriptsfolder, "STmodel_globalsens",  
+        if(!default_parameters){paste0("_", parameter_tag)}, 
+        ".mod", 
+        sep=""
+      ),  
+      sep = "", 
+      append = T
+    )  
+  } else {
+    cat(
+      "{};",
+      file = paste(
+        AMPLscriptsfolder, "STmodel_globalsens",  
+        if(!default_parameters){paste0("_", parameter_tag)}, 
+        ".mod", 
+        sep=""
+      ),  
+      sep = "", 
+      append = T
+    )  
+  }
+} else {
+  cat(
+    "{'none'};",
+    file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  
+    sep = "", 
+    append = T
+  )  
+}
+
+cat(
+  "\n\nset ag_bmp :=",
+  file = paste(
+    AMPLscriptsfolder, "STmodel_globalsens",  
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".mod", 
+    sep=""
+  ),  
+  sep = "\n", 
+  append = T
+)
+if(length(Ag_BMPs) > 0) {
+  cat(
+    "{",bmp_ag_vec_comma,"};",
+    file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  
+    sep = "", 
+    append = T
+  )
+} else {
+  cat(
+    "{'none'};",
+    file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  
+    sep = "", 
+    append = T
+  )
+}
+
+
+cat(
+  "\n\nset ripbuf_bmp :=",
+  file = paste(
+    AMPLscriptsfolder, "STmodel_globalsens",  
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".mod", 
+    sep=""
+  ),  
+  sep = "\n", 
+  append = T
+)
+if(length(RiparianBuffer_BMPs) > 0) {
+  cat(
+    "{",bmp_ripbuf_vec_comma,"};",
+    file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  
+    sep = "", 
+    append = T
+  ) 
+} else {
+  cat(
+    "{'none'};",
+    file = paste(
+      AMPLscriptsfolder, "STmodel_globalsens",  
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".mod", 
+      sep=""
+    ),  
+    sep = "", 
+    append = T
+  ) 
+}
+
+
+cat(
+  "\n\nset loads_all :=
+{'point', 'urban', 'ag'};
+  
+set area_sub :=
+{'urban', 'ag'};
+  
+set urban_imp :=
+{'urban'};
+  
+set urban_c :=
+{'urban'};
+  
+set point_c :=
+{'point'};
+  
+set cost_type :=
+{'capital', 'operations'};",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n", 
+append = T
+)
+
+cat("\n",   file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),   sep = "", append = T)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(comid_vec_N)) %do% {
+      cat(
+        paste0("param baseloads_N", i, " {comid_N", i, ", loads_all} >= 0;"),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n",
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(comid_vec_P)) %do% {
+      cat(
+        paste0("param baseloads_P", i, " {comid_P", i, ", loads_all} >= 0;"),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n",
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(comid_vec_N)) %do% {
+      cat(
+        paste0("param riparianload_N", i, " {c in comid_N", i, "} >= 0;"),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n",
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(comid_vec_P)) %do% {
+      cat(
+        paste0("param riparianload_P", i, " {c in comid_P", i, "} >= 0;"),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n",
+        append = T
+      )
+    }
+  }
+)
+
+
+
+cat(
+  "\nparam area {comid_all,area_sub} >=0;
+param urban_bmp_implementationpotential {comid_all, urban_bmp} >= 0, <= 1;
+param unbuffered_banklength {comid_all, ripbuf_bmp} >= 0;
+param total_banklength {c in comid_all} >= max {r in ripbuf_bmp} unbuffered_banklength[c,r];
+param total_banklength_se {c in comid_all};
+param total_banklength_rev {c in comid_all};
+param ag_costs_capital {comid_all,ag_bmp};
+param ag_costs_operations {comid_all,ag_bmp};
+param point_costs {comid_all,cost_type};
+param urban_costs {urban_bmp,cost_type};
+param ripbuf_costs_capital {comid_all, ripbuf_bmp};
+param ripbuf_costs_operations {comid_all, ripbuf_bmp};
+param runoff_coeff_urban {comid_all,urban_imp} >=0;
+param urban_cost_adjustment_coef {comid_all} >= 0;\n",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n",
+append = T
+)  
+
+if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+  cat(
+    "\nparam ag_effic_N {comid_all_N ,ag_bmp};
+param point_effic_N {comid_all_N, point_c};
+param urban_effic_N {comid_all_N, urban_bmp};\n",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n", 
+append = T
+  )
+}
+
+if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+  cat(
+    "\nparam ag_effic_P {comid_all_P ,ag_bmp};
+param point_effic_P {comid_all_P, point_c};
+param urban_effic_P {comid_all_P, urban_bmp};\n",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n", 
+append = T
+  )
+}
+
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(comid_vec_N)) %do% {
+      cat(
+        paste0(
+          "param riparianremoval_N", 
+          i, 
+          " {c in comid_N", 
+          i, 
+          ", r in ripbuf_bmp};"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n",
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(comid_vec_P)) %do% {
+      cat(
+        paste0(
+          "param riparianremoval_P", 
+          i, 
+          " {c in comid_P", 
+          i, 
+          ", r in ripbuf_bmp};"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n",
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      cat(
+        paste0("param loads_lim_N", i, " >= 0;"),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n",
+        append = T
+      )
+    }
+  }
+)
+
+cat("\n",   file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  append = T)
+
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      cat(
+        paste0("param loads_lim_P", i, " >= 0;"),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n",
+        append = T
+      )
+    }
+  }
+)
+
+cat("\n", file = paste(OutPath, "STmodel.mod", sep = ""), append = T)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      cat(
+        paste0("param loads_lim_N", i, "_rev >= 0;"),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n",
+        append = T
+      )
+    }
+  }
+)
+
+cat("\n",   file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  append = T)
+
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      cat(
+        paste0("param loads_lim_P", i, "_rev >= 0;"),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n",
+        append = T
+      )
+    }
+  }
+)
+
+cat("\n", file = paste(OutPath, "STmodel.mod", sep = ""), append = T)
+
+invisible(
+  foreach(i = 1:length(param_other_loads_tn)) %do% {
+    cat(
+      paste0("param other_loads_N", i, " >= 0;"),
+      file = paste(
+        AMPLscriptsfolder, "STmodel_globalsens",  
+        if(!default_parameters){paste0("_", parameter_tag)}, 
+        ".mod", 
+        sep=""
+      ),  
+      sep = "\n",
+      append = T
+    )
+  }
+)
+
+cat("\n", file = paste(OutPath, "STmodel.mod", sep = ""), append = T)
+
+invisible(
+  foreach(i = 1:length(param_other_loads_tp)) %do% {
+    cat(
+      paste0("param other_loads_P", i, " >= 0;"),
+      file = paste(
+        AMPLscriptsfolder, "STmodel_globalsens",  
+        if(!default_parameters){paste0("_", parameter_tag)}, 
+        ".mod", 
+        sep=""
+      ),  
+      sep = "\n",
+      append = T
+    )
+  }
+)
+
+cat("\n",   file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),   append = T)
+
+
+cat(
+  "param agcost_frac >=0;
+param acfttoft3 >=0;
+param pcp >=0;
+param agBMP_minarea;
+
+param urban_frac_min {urban_bmp} >=0, <= 1;
+param urban_frac_max {u in urban_bmp} >= urban_frac_min[u], <= 1;
+param ag_frac_min {ag_bmp} >= 0, <= 1;
+param ag_frac_max {a in ag_bmp} >= ag_frac_min[a], <= 1;
+param ripbuf_frac_min {ripbuf_bmp} >= 0, <= 1;
+param ripbuf_frac_max {r in ripbuf_bmp} >= ripbuf_frac_min[r], <= 1;
+
+param urban_frac_min_rev {urban_bmp} >=0, <= 1;
+param urban_frac_max_rev {u in urban_bmp} >= urban_frac_min_rev[u], <= 1;
+param ag_frac_min_rev {ag_bmp} >= 0, <= 1;
+param ag_frac_max_rev {a in ag_bmp} >= ag_frac_min_rev[a], <= 1;
+param ripbuf_frac_min_rev {ripbuf_bmp} >= 0, <= 1;
+param ripbuf_frac_max_rev {r in ripbuf_bmp} >= ripbuf_frac_min_rev[r], <= 1;
+
+param urban_design_depth {urban_bmp} >= 0;
+param urban_design_depth_rev {urban_bmp} >= 0;
+  
+",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "", 
+append = T
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      cat(
+        paste0(
+          "\nparam baseloads_N", 
+          i, 
+          "_se {comid_N", 
+          i, 
+          ", loads_all} >= 0;"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      cat(
+        paste0(
+          "\nparam baseloads_P", 
+          i, 
+          "_se {comid_P", 
+          i, 
+          ", loads_all} >= 0;"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      cat(
+        paste0(
+          "\nparam riparianload_N", 
+          i, 
+          "_se {comid_N", 
+          i, 
+          "} >= 0;"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      cat(
+        paste0(
+          "\nparam riparianload_P", 
+          i, 
+          "_se {comid_P", 
+          i, 
+          "} >= 0;"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      write(
+        paste0(
+          "\nparam riparianremoval_N", 
+          i, 
+          "_se {c in comid_N", 
+          i, 
+          ", r in ripbuf_bmp};"
+        ), 
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      write(
+        paste0(
+          "\nparam riparianremoval_P", 
+          i, 
+          "_se {c in comid_P", 
+          i, 
+          ", r in ripbuf_bmp};"
+        ), 
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        append = T
+      )
+    }
+  }
+)
+
+if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+  cat(
+    "
+param ag_effic_N_se {comid_all_N ,ag_bmp} >= 0;
+param urban_effic_N_se {comid_all_N, urban_bmp} >= 0;",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n",
+append = TRUE
+  )
+  
+}
+
+if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+  cat(
+    "
+param ag_effic_P_se {comid_all_P ,ag_bmp} >= 0;
+param urban_effic_P_se {comid_all_P, urban_bmp} >= 0;",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n",
+append = TRUE
+  )
+}
+cat(
+  "
+param ripbuf_costs_capital_se {comid_all, ripbuf_bmp};
+param ripbuf_costs_operations_se {comid_all, ripbuf_bmp};
+
+param area_se {comid_all,area_sub} >=0;
+
+param ag_costs_capital_se {comid_all,ag_bmp};
+param ag_costs_operations_se {comid_all,ag_bmp};
+
+param runoff_coeff_urban_se {comid_all,urban_imp} >=0;
+
+param urban_cost_adjustment_coef_se {comid_all} >= 0;
+param urban_bmp_implementationpotential_se {comid_all, urban_bmp} >= 0;
+
+param unbuffered_banklength_se {comid_all, ripbuf_bmp} >= 0;
+
+
+",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n",
+append = TRUE
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      cat(
+        paste0(
+          "\nparam baseloads_N", 
+          i, 
+          "_rev {comid_N", 
+          i, 
+          ", loads_all};"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      cat(
+        paste0(
+          "\nparam baseloads_P", 
+          i, 
+          "_rev {comid_P", 
+          i, 
+          ", loads_all};"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      cat(
+        paste0(
+          "\nparam riparianload_N", 
+          i, 
+          "_rev {comid_N", 
+          i, 
+          "};"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      cat(
+        paste0(
+          "\nparam riparianload_P", 
+          i, 
+          "_rev {comid_P", 
+          i, 
+          "};"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+  cat(
+    "
+    param ag_effic_N_rev {comid_all_N ,ag_bmp};
+param point_effic_N_rev {comid_all_N, point_c};
+param urban_effic_N_rev {comid_all_N, urban_bmp};
+param urban_bmp_implementationpotential_rev {comid_all, urban_bmp};
+param unbuffered_banklength_rev {comid_all, ripbuf_bmp};
+",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n",
+append = TRUE
+  )
+}
+
+if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+  cat(
+    "
+    param ag_effic_P_rev {comid_all_P ,ag_bmp};
+param point_effic_P_rev {comid_all_P, point_c};
+param urban_effic_P_rev {comid_all_P, urban_bmp};",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n",
+append = TRUE
+  )
+}
+cat(
+  "
+param area_rev {comid_all,area_sub};
+param ag_costs_capital_rev {comid_all,ag_bmp};
+param ag_costs_operations_rev {comid_all,ag_bmp};
+param point_costs_rev {comid_all,cost_type};
+param urban_costs_rev {urban_bmp,cost_type};
+param ripbuf_costs_capital_rev {comid_all, ripbuf_bmp};
+param ripbuf_costs_operations_rev {comid_all, ripbuf_bmp};
+param runoff_coeff_urban_rev {comid_all, urban_imp};
+param urban_cost_adjustment_coef_rev {comid_all};
+",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n",
+append = TRUE
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      write(
+        paste0(
+          "\nparam riparianremoval_N", 
+          i, 
+          "_rev {c in comid_N", 
+          i, 
+          ", r in ripbuf_bmp};"
+        ), 
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      write(
+        paste0(
+          "\nparam riparianremoval_P", 
+          i, 
+          "_rev {c in comid_P", 
+          i, 
+          ", r in ripbuf_bmp};"
+        ), 
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      cat(
+        paste0(
+          "\nparam other_loads_N", 
+          i, 
+          "_rev;"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      cat(
+        paste0(
+          "\nparam other_loads_P", 
+          i, 
+          "_rev;"
+        ),   
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "", 
+        append = T
+      )
+    }
+  }
+)
+
+cat(
+  "
+param agcost_frac_rev >=0;
+
+param ps_coef {c in comid_all} := point_costs_rev[c,'capital'] + point_costs_rev[c,'operations'];
+param urban_coef {c in comid_all, u in urban_bmp} := acfttoft3 * pcp * urban_design_depth_rev[u] * runoff_coeff_urban_rev[c,'urban'] * area_rev[c,'urban'] * (urban_costs_rev[u,'capital'] + urban_costs_rev[u,'operations']) ;
+param ag_coef {c in comid_all, a in ag_bmp} := agcost_frac_rev * area_rev[c,'ag'] *  (ag_costs_capital_rev[c,a] + ag_costs_operations_rev[c,a]) ; 
+param ripbuf_coef {c in comid_all, r in ripbuf_bmp} := agcost_frac_rev * (ripbuf_costs_capital_rev[c, r] +  ripbuf_costs_operations_rev[c, r]);
+
+",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n",
+append = TRUE
+)
+
+cat(
+  "
+var agBMP_bin {comid_all, ag_bmp} binary;
+var urbanBMP_bin {comid_all, urban_bmp} binary;
+var point_dec {comid_all} binary :=0;
+var urban_frac {c in comid_all, u in urban_bmp} >= urban_frac_min_rev[u] * urban_bmp_implementationpotential_rev[c, u]  <= urban_frac_max_rev[u] * urban_bmp_implementationpotential_rev[c, u] :=0;
+var ag_frac {comid_all, a in ag_bmp} >= ag_frac_min_rev[a] <= ag_frac_max_rev[a] :=0;
+var ripbuf_length {c in comid_all, r in ripbuf_bmp} >= 0 <= unbuffered_banklength_rev[c, r] * ripbuf_frac_max_rev[r] := 0;
+
+  
+minimize cost: sum {c in comid_all} (ps_coef[c] * point_dec[c]) + 
+sum {c in comid_all, u in urban_bmp} (urban_coef[c,u] * urban_frac[c,u]) + 
+sum {c in comid_all, a in ag_bmp} (ag_coef[c,a] * ag_frac[c,a]) +
+sum {c in comid_all, r in ripbuf_bmp} (ripbuf_coef[c, r] * ripbuf_length[c, r]);
+  \n",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n", 
+append = T
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      cat(
+        paste0(
+          "subject to total_loads_N", i, ":\n",
+          "other_loads_N", i, "_rev + sum {c in comid_N", i, "} (baseloads_N", i, 
+          "_rev[c,'ag'] * (1 - sum {a in ag_bmp}(ag_effic_N_rev[c,a] * ag_frac[c,a])))", 
+          " + \n",
+          "sum {c in comid_N", i, "} (baseloads_N", i, 
+          "_rev[c,'urban'] * (1 - sum {u in urban_bmp}(urban_effic_N_rev[c,u] *",
+          " urban_frac[c,u]))) + \n",
+          "sum {c in comid_N", i, "} (baseloads_N", i, "_rev[c,'point'] * (1 -",
+          " (point_effic_N_rev[c,'point'] * point_dec[c]))) - \n",
+          "sum {c in comid_N", i, ", r in ripbuf_bmp} (ripbuf_length[c, r] *",
+          " riparianremoval_N", i, "_rev[c, r]) <= loads_lim_N", i, "_rev; \n"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      cat(
+        paste0(
+          "subject to total_loads_P", i, ":\n",
+          "other_loads_P", i, "_rev + sum {c in comid_P", i, "} (baseloads_P", i, 
+          "_rev[c,'ag'] * (1 - sum {a in ag_bmp}(ag_effic_P_rev[c,a] * ",
+          "ag_frac[c,a]))) + \n",
+          "sum {c in comid_P", i, "} (baseloads_P", i,
+          "_rev[c,'urban'] * (1 - sum {u in urban_bmp}(urban_effic_P_rev[c,u] *", 
+          "urban_frac[c,u]))) + \n",
+          "sum {c in comid_P", i, "} (baseloads_P", i, "_rev[c,'point'] * (1 -",
+          "(point_effic_P_rev[c,'point'] * point_dec[c])))  - \n",
+          "sum {c in comid_P", i, ", r in ripbuf_bmp} (ripbuf_length[c, r] *",
+          "riparianremoval_P", i, "_rev[c, r]) <= loads_lim_P", i, "_rev; \n"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      cat(
+        paste0(
+          "subject to riparian_loads_N", i, " {c in comid_N", i, "}:\n",
+          "sum {r in ripbuf_bmp} (ripbuf_length[c, r] * riparianremoval_N", i, 
+          "_rev[c, r]) <= riparianload_N", i, "_rev[c]; \n"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n", 
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      cat(
+        paste0(
+          "subject to riparian_loads_P", i, " {c in comid_P", i, "}:\n",
+          "sum {r in ripbuf_bmp} (ripbuf_length[c, r] * riparianremoval_P", i, 
+          "_rev[c, r]) <= riparianload_P", i, "_rev[c]; \n"
+        ),
+        file = paste(
+          AMPLscriptsfolder, "STmodel_globalsens",  
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".mod", 
+          sep=""
+        ),  
+        sep = "\n", 
+        append = T
+      )
+    }
+  }
+)
+
+cat(
+  "subject to ag_treat_min {c in comid_all, a in ag_bmp}:
+ag_frac[c,a] * area_rev[c,'ag'] >= agBMP_minarea * agBMP_bin[c,a];
+  
+subject to ag_frac_const {c in comid_all, a in ag_bmp}:
+ag_frac[c,a] <= agBMP_bin[c,a];
+  
+subject to urban_frac_const {c in comid_all, u in urban_bmp}:
+urban_frac[c,u] <= urbanBMP_bin[c,u];
+
+subject to ag_frac_limit {c in comid_all}: 
+sum {a in ag_bmp} ag_frac[c,a] <= 1;
+# prevents multiple BMPs being implemented on the same area
+
+subject to urban_frac_limit {c in comid_all}: 
+sum {u in urban_bmp} urban_frac[c,u] <= 1;
+# prevents multiple BMPs being implemented on the same area
+
+subject to total_banks {c in comid_all}:
+sum {r in ripbuf_bmp} ripbuf_length[c,r] <= max {r in ripbuf_bmp} 
+   unbuffered_banklength_rev[c,r];
+  
+",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n", 
+append = T
+)
+
+if(!grepl("''", paste0(pervbmp_urban_vec_comma, collapse = ""))){
+  cat(
+    "
+subject to roads_and_parkinglots {c in comid_all}:
+sum{up in urban_pervbmp} urban_frac[c, up] <= max {up in urban_pervbmp} 
+   urban_bmp_implementationpotential_rev[c,up];
+",
+file = paste(
+  AMPLscriptsfolder, "STmodel_globalsens",  
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod", 
+  sep=""
+),  
+sep = "\n", 
+append = T
+  )
+}
+
+```
+
+## Write Global Sensitivity Data Script
+```{r write data AMPL file}
+
+orig.dat <- read.table(
+  file = paste(OutPath, "STdata_uncertainty.dat", sep=""), 
+  header = FALSE,
+  sep = "\n",
+  quote = ""
+)
+
+write.table(
+  orig.dat, 
+  file = paste(
+    AMPLscriptsfolder, "STdata_globalsens", 
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".dat", 
+    sep=""
+  ),
+  sep = "\t",
+  row.names = F,
+  col.names = F,
+  na = "",
+  quote = F
+)
+
+invisible(
+  if("TN" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tn)) %do% {
+      write(
+        paste0("\nparam riparianload_N", i, "_se :="), 
+        file = paste(
+          "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".dat", 
+          sep=""
+        ),
+        append = T
+      )
+      if(length(RiparianBuffer_BMPs) > 0) {
+        write.table(
+          riparian_tn_dat[[i]] %>% 
+            select(comid_form, riparian = sin_riparian), # renaming also forces the order incase they are disordered in processing code above
+          file = paste(
+            "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+            if(!default_parameters){paste0("_", parameter_tag)}, 
+            ".dat", 
+            sep=""
+          ),
+          append = T,
+          sep = "\t",
+          row.names = F,
+          col.names = F,
+          na = "",
+          quote = F
+        )
+      } else {
+        write.table(
+          ripbuf_bmp_dummy_tn[[i]] %>% 
+            select(comid, none = none), # renaming also forces the order incase they are disordered in processing code above
+          file = paste(
+            "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+            if(!default_parameters){paste0("_", parameter_tag)}, 
+            ".dat", 
+            sep=""
+          ),
+          append = T,
+          sep = "\t",
+          row.names = F,
+          col.names = F,
+          na = "",
+          quote = F
+        )
+      }
+      write(
+        paste0(";"), 
+        file = paste(
+          "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".dat", 
+          sep=""
+        ),
+        append = T
+      )
+    }
+  }
+)
+
+invisible(
+  if("TP" %in% user_specs_loadingtargets$TN_or_TP) {
+    foreach(i = 1:length(param_loads_lim_tp)) %do% {
+      write(
+        paste0("\nparam riparianload_P", i, "_se :="), 
+        file = paste(
+          "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".dat", 
+          sep=""
+        ),
+        append = T
+      )
+      if(length(RiparianBuffer_BMPs) > 0) {
+        write.table(
+          riparian_tp_dat[[i]] %>% 
+            select(comid_form, riparian = sip_riparian), # renaming also forces the order incase they are disordered in processing code above
+          file = paste(
+            "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+            if(!default_parameters){paste0("_", parameter_tag)}, 
+            ".dat", 
+            sep=""
+          ),
+          append = T,
+          sep = "\t",
+          row.names = F,
+          col.names = F,
+          na = "",
+          quote = F
+        )
+      } else {
+        write.table(
+          ripbuf_bmp_dummy_tp[[i]] %>% 
+            select(comid, none = none), # renaming also forces the order incase they are disordered in processing code above
+          file = paste(
+            "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+            if(!default_parameters){paste0("_", parameter_tag)}, 
+            ".dat", 
+            sep=""
+          ),
+          append = T,
+          sep = "\t",
+          row.names = F,
+          col.names = F,
+          na = "",
+          quote = F
+        )
+      }
+      write(
+        paste0(";"), 
+        file = paste(
+          "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+          if(!default_parameters){paste0("_", parameter_tag)}, 
+          ".dat", 
+          sep=""
+        ),
+        append = T
+      )
+    }
+  }
+)
+
+if(length(Urban_BMPs) > 0) {
+  write(
+    paste0(
+      "\nparam urban_bmp_implementationpotential_se : ", 
+      paste(bmp_urban_vec, collapse = "  "), 
+      ":="
+    ),
+    file = paste(
+      "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".dat", 
+      sep=""
+    ),
+    append = TRUE
+  )
+  write.table(
+    urban_bmp_implementationpotential_dat_se %>% 
+      select(comid_form, contains("_se")) %>%
+      rename_with(.cols = contains("_se"), .fn = ~gsub("_se", "", .)) %>%
+      select(comid_form, any_of(Urban_BMPs)), # selection forces the order incase they are disordered in preprocessing code above
+    file = paste(
+      "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".dat", 
+      sep=""
+    ),
+    append = T,
+    sep = "\t",
+    row.names = F,
+    col.names = F,
+    na = "",
+    quote = F
+  )
+} else {
+  write(
+    paste0("\nparam urban_bmp_implementationpotential: 'none' :="),
+    file = paste(
+      "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".dat", 
+      sep=""
+    ),
+    append = TRUE
+  )
+  write.table(
+    urban_bmp_dummy %>% 
+      select(comid, none), # selection forces the order incase they are disordered in preprocessing code above
+    file = paste(
+      "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".dat", 
+      sep=""
+    ),
+    append = T,
+    sep = "\t",
+    row.names = F,
+    col.names = F,
+    na = "",
+    quote = F
+  )
+}
+write( ";",       file = paste(
+  "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".dat", 
+  sep=""
+), append = T)
+
+if(length(RiparianBuffer_BMPs) > 0) {
+  write( 
+    paste0(
+      "\nparam unbuffered_banklength_se : ",  
+      paste(bmp_ripbuf_vec, collapse  = "  "), 
+      " :="
+    ), 
+    file = paste(
+      "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".dat", 
+      sep=""
+    ),
+    append = T
+  )
+  write.table(
+    streambanklength_available_dat_se %>% 
+      select(comid_form, any_of(RiparianBuffer_BMPs)), # selection forces the order incase they are disordered in preprocessing code above
+    file = paste(
+      "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".dat", 
+      sep=""
+    ),
+    append = T,
+    sep = "\t",
+    row.names = F,
+    col.names = F,
+    na = "",
+    quote = F
+  )
+} else {
+  write( 
+    paste0("\nparam unbuffered_banklength_se: 'none' :="), 
+    file = paste(
+      "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".dat", 
+      sep=""
+    ),
+    append = T
+  )
+  write.table(
+    ripbuf_bmp_dummy %>% 
+      select(comid, none), # selection forces the order incase they are disordered in preprocessing code above
+    file = paste(
+      "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".dat", 
+      sep=""
+    ),
+    append = T,
+    sep = "\t",
+    row.names = F,
+    col.names = F,
+    na = "",
+    quote = F
+  )
+}
+write( ";",       file = paste(
+  "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".dat", 
+  sep=""
+),append = T)
+
+write( 
+  paste0("\nparam total_banklength_se :="), 
+  file = paste(
+    "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".dat", 
+    sep=""
+  ),
+  append = T
+)
+if(length(RiparianBuffer_BMPs) > 0) {
+  write.table(
+    streambanklength_total_dat_se %>% 
+      select(comid_form, totalbanklength_ft), # selection forces the order incase they are disordered in preprocessing code above
+    file = paste(
+      "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".dat", 
+      sep=""
+    ),
+    append = T,
+    sep = "\t",
+    row.names = F,
+    col.names = F,
+    na = "",
+    quote = F
+  )
+} else {
+  write.table(
+    ripbuf_bmp_dummy %>% 
+      select(comid, none), # selection forces the order incase they are disordered in preprocessing code above
+    file = paste(
+      "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+      if(!default_parameters){paste0("_", parameter_tag)}, 
+      ".dat", 
+      sep=""
+    ),
+    append = T,
+    sep = "\t",
+    row.names = F,
+    col.names = F,
+    na = "",
+    quote = F
+  )
+}
+write( ";",       file = paste(
+  "./ManuscriptFigures/SensitivityAnalysis/AMPLscripts/STdata_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".dat", 
+  sep=""
+), append = T)
+```
+
+## Send AMPL jobs to NEOS
+
+At this point the Global Sensitivity Analysis would also work if users prefer to manually submit and retrieve jobs from NEOS 
+```{r send AMPL scripts to solver}
+
+tmp <-my_NgetSolverTemplate(
+  category = "lp", solvername = "CPLEX", inputMethod = "AMPL"
+)
+## setting path to model and data files
+modf <- paste0(
+  AMPLscriptsfolder, 
+  "STmodel_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod"
+)
+datf <- paste0(
+  AMPLscriptsfolder, 
+  "STdata_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".dat"
+)
+comf <- paste0(
+  AMPLscriptsfolder, 
+  "STcommand_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".amp"
+)
+
+## enter email & comments
+email <- "kelly-anne.moffa@icf.com"
+
+comments <- paste(
+  "global sensitivity test",
+  if(!default_parameters){paste0("(subtext ", parameter_tag, ")")}, 
+  "with", 
+  nbootstraps,
+  "bootstraps."
+)
+## import file contents
+modc <- paste(paste(readLines(modf), collapse = "\n"), "\n")
+datc <- paste(paste(readLines(datf), collapse = "\n"), "\n")
+comc <- paste(paste(readLines(comf), collapse = "\n"), "\n")
+
+## create list object
+argslist <- list(
+  model = modc, data = datc, commands = comc, comments = comments, email = email
+)
+## create XML string
+xmls <- CreateXmlString(neosxml = tmp, cdatalist = argslist)
+
+## Submit job
+job.xml.text <- NsubmitJob(
+  xmlstring = xmls, user = "rneos", interface = "", id = 0
+)
+
+## Retrieve results
+resultfile <- NgetFinalResults(obj = job.xml.text, convert = TRUE)
+write.table(
+  resultfile@ans, 
+  file = paste0(
+    NEOSresults,
+    "NEOS_result_globalsens",
+    nbootstraps,
+    "bs", 
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".txt"
+  )
+)
+```
+
+
+## Parse Global Sensitivity Results
+```{r load file}
+
+dat <- fread(
+  paste0(
+    NEOSresults,
+    "NEOS_result_globalsens",
+    nbootstraps,
+    "bs", 
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".txt"
+  ),
+  fill = TRUE,
+  skip = 2,
+  sep = "\t", 
+  sep2 = "\n"
+) %>%
+  rename(V1 = 1)
+
+```
+
+```{r parse cost and solve results}
+
+end.rows <- which(sapply(dat$V1, grepl, pattern = ";"))
+bootstrapset_begin <- which(
+  sapply(dat$V1, grepl, pattern = "set Bootstraps :=")
+)
+bootstrapset_end <- end.rows[min(which(end.rows >= bootstrapset_begin))]
+str_extract(
+  paste(dat[bootstrapset_begin:bootstrapset_end,], collapse = " "),
+  ".*?([0-9]+).*"
+)
+n_bootstraps <- paste(
+  dat[bootstrapset_begin:bootstrapset_end,], collapse = " "
+) %>%
+ str_match_all("[0-9]+") %>%
+  unlist %>%
+  as.numeric %>%
+  max
+# n_bootstraps <- 5068
+
+solve.stati <- dat[which(sapply(dat$V1, grepl, pattern = "solve_result = ")),] 
+solve_results <- as.numeric(sapply(solve.stati, grepl, pattern = "solved"))
+
+cost.displays <- dat[which(sapply(dat$V1, grepl, pattern = "cost = ")),]$V1
+cost_results <- parse_number(as.character(cost.displays))
+
+loads_lim.displays <- data.frame(
+  str_split_fixed(
+    dat[which(sapply(dat$V1, grepl, pattern = "loads_lim_")),]$V1, " ", n = 3
+  )
+)
+names(loads_lim.displays) <- c("Target", "X", "Limit")
+
+loads_lim.summary <- loads_lim.displays %>%
+  mutate(
+    Target = gsub("loads_lim_", "", gsub("_rev", "", Target)),
+    Limit = as.numeric(Limit),
+    bootstrap = foreach(i = 1:n_bootstraps, .combine = "c") %do% {rep(i, 3)}
+  ) %>%
+  pivot_wider(id_cols = bootstrap, names_from = Target, values_from = Limit)
+
+bootstrap.summary <- data.frame(
+  loads_lim.summary,
+  solve_result = solve_results,
+  cost = cost_results
+) %>%
+  mutate(
+    cost = case_when(solve_results == 0 ~ NA_real_, solve_results == 1 ~ cost)
+  )
+
+ggplot(
+  bootstrap.summary, aes(x = N1, y = solve_results, color = P1, size = P2)
+) + 
+  geom_point() 
+ggplot(
+  bootstrap.summary, aes(x = P1, y = solve_results, size = P2, alpha = N1)
+) +
+  geom_point()
+ggplot(
+  bootstrap.summary, aes(x = P2, y = solve_results, color = P1, alpha = N1)
+) +
+  geom_point()
+ggplot(bootstrap.summary, aes(x = cost)) + geom_histogram()
+ggplot(bootstrap.summary, aes(x = N1, y = cost)) + geom_point()
+
+ModelSuccessorFailure <- ggplot(
+  bootstrap.summary, aes(x = N1, y = solve_results)
+) + 
+  geom_point(size = 3, alpha = 0.1) +
+  labs(x = "Target Loading at the MA Border (kg N/yr)", y = "Model Success")
+
+print(ModelSuccessorFailure)
+
+cost.plot <- ggplot(bootstrap.summary, aes(x = cost)) + 
+  geom_density(color = "black", fill = "darkgreen") +
+  scale_y_continuous(name = "Probability") +
+  scale_x_log10(
+    name = "Annualized Cost",
+    breaks = c(100000, 1000000, 10000000, 100000000), 
+    minor_breaks = c(
+      100000, 
+      200000,
+      300000,
+      400000,
+      500000,
+      600000,
+      700000,
+      800000,
+      900000,
+      1000000,
+      2000000,
+      3000000,
+      4000000,
+      5000000,
+      6000000,
+      7000000,
+      8000000,
+      9000000,
+      10000000,
+      20000000,
+      30000000,
+      40000000,
+      50000000,
+      60000000,
+      70000000,
+      80000000,
+      90000000,
+      100000000,
+      200000000,
+      300000000,
+      400000000,
+      500000000,
+      600000000,
+      700000000,
+      800000000,
+      900000000
+    ),
+    labels = c("", "$1,000,000", "", "$100,000,000"),
+  ) +
+  theme_bw() 
+
+print(cost.plot)
+
+TotalCostbyLoadingTarget <- ggplot(
+  bootstrap.summary %>% filter(solve_results == 1), 
+  aes(x = N1, y = cost)
+) + 
+  geom_point() +
+  scale_x_continuous(
+    trans = "identity",
+    name = "Target Loading at the MA Border (kg N/yr)",
+    limits = c(min(bootstrap.summary$N1), max(bootstrap.summary$N1))
+  ) + 
+  scale_y_continuous(
+    trans = "identity",
+    name = "Annualized Cost",
+    breaks = c(
+      30000000, 60000000, 90000000
+    ),
+    labels = c("$30,000,000", "$60,000,000", "$90,000,000"),
+  ) 
+
+print(TotalCostbyLoadingTarget)
+```
+
+```{r analysis for global analysis text section}
+## For Text in Global Sensivity Analysis section
+summary(
+  with(
+    bootstrap.summary %>% 
+      mutate(cost.adj = cost, N1.adj = N1) %>%
+      filter(cost.adj > 0), 
+    lm(log10(cost.adj) ~ N1.adj)
+  )
+)
+
+min(bootstrap.summary %>% filter(!is.na(cost)) %>% .$N1)
+
+1 - min(bootstrap.summary %>% filter(!is.na(cost)) %>% .$N1) / (6218703 / 0.9) # default loads_lim_N1 parameter is 6218703, which represents a 10% decrease in loading
+
+ggplot(
+  bootstrap.summary %>%
+    filter(solve_result == 1) %>%
+    mutate(bin = ntile(N1, 20)) %>%
+    group_by(bin) %>%
+    summarize(
+      spread = max(cost) - min(cost),
+      N1 = mean(N1)
+    ),
+  aes(x = N1, y = spread)
+) +
+  geom_point()
+
+bootstrap.summary %>%
+  filter(solve_result == 1) %>%
+  mutate(bin = ntile(N1, 20)) %>%
+  group_by(bin) %>%
+  summarize(
+    max(cost),
+    min(cost),
+    spread = max(cost) - min(cost),
+    N1 = mean(N1)
+  )
+
+summary(
+  with(
+    bootstrap.summary %>%
+      filter(solve_result == 1) %>%
+      mutate(bin = ntile(N1, 20)) %>%
+      group_by(bin) %>%
+      mutate(
+        spread = max(cost) - min(cost),
+        N1 = mean(N1)
+      ) %>%
+      mutate(spread.adj = spread, N1.adj = N1), 
+    lm(log10(spread.adj) ~ (N1.adj))
+  )
+)
+
+bootstrap.summary %>%
+  filter(solve_result == 1) %>%
+  filter(N1 > (6218703 / 0.9) * 0.895, N1 < (6218703 / 0.9) * 0.904)  %>% # default loads_lim_N1 parameter is 6218703, which represents a 10% decrease in loading
+  summarize(min(cost), max(cost))
+## end analyses for text
+```
+
+```{r plots}
+
+TotalCostbyLoadingTarget_withmodelfailure <- ggplot(
+  bootstrap.summary, aes(x = N1, y = cost)
+) + 
+  geom_point() +
+  scale_x_continuous(
+    name = "Target Loading at the MA Border (kg N/yr)",
+    breaks = c(5500000, 6000000, 6500000),
+    labels = c("5,500,000", "6,000,000", "6,500,000")
+  ) + 
+  scale_y_continuous(
+    name = "Annualized Cost (x $1,000,000)",
+    breaks = c(
+      30000000, 60000000, 90000000
+    ),
+    labels = c("$30", "$60", "$90"),
+  ) +
+  geom_point(
+    data = bootstrap.summary %>% 
+      filter(solve_result == 0) %>%
+      mutate(cost = 0), 
+    color = "grey",
+    shape = 17
+  )
+
+print(TotalCostbyLoadingTarget_withmodelfailure)
+
+bootstrap.summary %>% group_by(solve_result) %>% summarize(n())
+
+```
+
+```{r save cost and solve result output figures}
+ggsave(
+  "UserGuideFig5-1.png",
+  plot = ModelSuccessorFailure,
+  path = "./ManuscriptFigures/",
+  height = 4,
+  width = 4,
+  units = "in"
+)
+
+ggsave(
+  "UserGuideFig5-2.png",
+  plot = TotalCostbyLoadingTarget,
+  path = "./ManuscriptFigures/",
+  height = 3,
+  width = 4,
+  units = "in"
+)
+
+ggsave(
+  "Fig4.png",
+  plot = TotalCostbyLoadingTarget_withmodelfailure,
+  path = "./ManuscriptFigures/",
+  height = 3,
+  width = 4,
+  units = "in"
+)
+```
+
+
+```{r parse BMP decisions}
+
+BMPdescriptions_begin <- which(sapply(dat$V1, grepl, pattern = "sum[{]c in comid_all[}]"))
+which_point <- grep("point", dat[BMPdescriptions_begin,]$V1)
+which_ag <- grep("ag", dat[BMPdescriptions_begin,]$V1)
+which_urban <- grep("urban", dat[BMPdescriptions_begin,]$V1)
+which_ripbuf <- grep("ripbuf", dat[BMPdescriptions_begin,]$V1)
+BMP <- c()
+BMP[which_point] <- "point"
+BMP[which_ag] <- "ag"
+BMP[which_urban] <- "urban"
+BMP[which_ripbuf] <- "ripbuf"
+
+BMP.end.rows <- which(sapply(dat$V1, grepl, pattern = ";"))
+
+BMPdescriptions_end <- foreach(
+  i = 1:length(BMPdescriptions_begin), .combine = "c"
+) %do% {
+  if(i %in% which_point) {tmp <- BMPdescriptions_begin[i]} else {
+    tmp <- BMP.end.rows[min(which(BMP.end.rows > BMPdescriptions_begin[i]))]
+  }
+  tmp
+}
+
+BMPspending_summary <- foreach(i = 1:length(BMPdescriptions_begin), .combine = "rbind") %do% {
+  tmp <- dat[BMPdescriptions_begin[i]:BMPdescriptions_end[i],1]$V1
+  if(i %in% which_point) {
+    bee <- as.numeric(str_split_fixed(tmp, " = ", n = 2)[2])
+    tmp.dat <- data_frame(bootstrap = ceiling(i / 4), BMP = "WWTP_upgrades", Total_Spent = bee)
+  } else if(length(tmp) > 2) {
+    tmp.clean <- str_split_fixed(parse_character(tmp[2:(length(tmp)-1)]), " ", n = 2)
+    BMP <- parse_character(tmp.clean[,1])
+    costs <- parse_number(tmp.clean[,2])
+    
+    tmp.dat <- data_frame(bootstrap = ceiling(i / 4), BMP = BMP, Total_Spent = costs)
+  } else {tmp.dat <- NULL}
+  tmp.dat
+}
+
+BMPspending_summary_full <- BMPspending_summary %>%
+  full_join(., BMPspending_summary %>% expand(bootstrap, BMP)) %>%
+  mutate(
+    Total_Spent = case_when(
+      is.na(Total_Spent) ~ 0, !is.na(Total_Spent) ~ Total_Spent
+    ),
+    BMP_Category = case_when(
+      BMP %in% c("WWTP_upgrades") ~ "Point Source BMPs",
+      BMP %in% c("Grassed_Buffer", "Forested_Buffer") ~ "Riparian Buffer BMPs",
+      BMP %in% c("Biofiltration_w_Underdrain", "Bioretention_Basin", "Enhanced_Biofiltration_w_ISR", "Extended_Dry_Detention_Basin", "Grass_Swale_w_detention", "Gravel_Wetland", "Infiltration_Basin", "Infiltration_Chamber", "Infiltration_Trench", "Porous_Pavement_w_subsurface_infiltration", "Porous_Pavement_w_underdrain", "Sand_Filter_w_underdrain", "Wet_Pond") ~ "Urban BMPs",
+      BMP %in% c("Conservation", "Contour_Farming", "Fert_20", "Filterstrip", "Manure_Injection", "MIN_TILL", "Ponds", "Terrace_Only", "Terrace_Waterway", "Waterway_Only") ~ "Agricultural BMPs"
+    )
+  )%>%
+  left_join(., bootstrap.summary, by = "bootstrap") %>%
+  filter(solve_result == 1)
+
+BMPspending.hists <- ggplot(BMPspending_summary_full, aes(x = Total_Spent)) + 
+  geom_density(fill = "darkgreen") + 
+  facet_wrap("BMP", scales = "free_y") + 
+  scale_y_continuous(name = "Probability") +
+  scale_x_continuous(
+    trans = "pseudo_log",
+    name = "Annualized Cost",
+    breaks = c(1, 1000, 1000000), 
+    minor_breaks = c(
+      100, 
+      200,
+      300,
+      400,
+      500,
+      600,
+      700,
+      800,
+      900,
+      10000,
+      20000,
+      30000,
+      40000,
+      50000,
+      60000,
+      70000,
+      80000,
+      90000,
+      10000000,
+      20000000,
+      30000000,
+      40000000,
+      50000000,
+      60000000,
+      70000000,
+      80000000,
+      90000000
+    ),
+    labels = c("$1", "$1,000", "$1,000,000"),
+  ) +
+  theme_bw() 
+
+AgBMPSpending <- ggplot(
+  BMPspending_summary_full %>% filter(BMP_Category == "Agricultural BMPs"), 
+  aes(y = Total_Spent, x = N1, color = BMP, group = BMP)
+) + 
+  geom_smooth(lwd = 2, se = FALSE) +
+  geom_point(alpha = 0.5) +
+  scale_x_continuous(
+    name = "Target Loading at the MA Border (kg N/yr)",
+    limits = c(min(bootstrap.summary$N1), max(bootstrap.summary$N1))
+  ) +
+  scale_y_continuous(
+    name = "Annualized Spending", 
+    breaks = c(0, 2000000, 4000000, 6000000), 
+    labels = c("$0", "$2,000,000", "$4,000,000", "$6,000,000")
+  ) +
+  scale_color_brewer(palette = "Set3")
+
+print(AgBMPSpending)
+
+PointBMPSpending <- ggplot(
+  BMPspending_summary_full %>% filter(BMP_Category == "Point Source BMPs"), 
+  aes(y = Total_Spent, x = N1, color = BMP, group = BMP)
+) + 
+  geom_smooth(lwd = 2, se = FALSE) +
+  geom_point(alpha = 0.5) +
+  scale_x_continuous(
+    name = "Target Loading at the MA Border (kg N/yr)",
+    limits = c(min(bootstrap.summary$N1), max(bootstrap.summary$N1))
+  ) +
+  scale_y_continuous(
+    name = "Annualized Spending", 
+    breaks = c(0, 100000, 200000, 300000, 400000), 
+    labels = c("$0", "$100,000", "$200,000", "$300,000", "$400,000")
+  ) +
+  scale_color_brewer(palette = "Set2")
+
+print(PointBMPSpending)
+
+UrbanBMPSpending <- ggplot(
+  BMPspending_summary_full %>% filter(BMP_Category == "Urban BMPs" & BMP != "Grass_Swale_w_detention"), # Grass_Swale_w_detention is underused, and otherwise I run out of colors
+  aes(y = Total_Spent, x = N1, color = BMP, group = BMP)
+) + 
+  geom_point(size = 2) +
+  geom_smooth(lwd = 2, se = FALSE) +
+  scale_x_continuous(
+    name = "Target Loading at the MA Border (kg N/yr)",
+    limits = c(min(bootstrap.summary$N1), max(bootstrap.summary$N1))
+  ) +
+  scale_y_continuous(
+    name = "Annualized Spending", 
+    breaks = c(0, 15000000, 30000000, 45000000, 60000000), 
+    labels = c("$0", "$15,000,000", "$30,000,000", "$45,000,000", "$60,000,000")
+  ) +
+  scale_color_brewer(palette = "Set3") 
+
+print(UrbanBMPSpending)
+
+BMPspending_urban_log <- ggplot(
+  BMPspending_summary_full %>% filter(BMP_Category == "Urban BMPs" & BMP != "Grass_Swale_w_detention"), # Grass_Swale_w_detention is underused, and otherwise I run out of colors
+  aes(y = Total_Spent, x = N1, color = BMP, group = BMP)
+) + 
+  geom_point(size = 2) +
+  geom_smooth(lwd = 2, se = FALSE) +
+  geom_vline(xintercept = 6218599, color = "darkgreen", lwd = 2) +
+  scale_x_continuous(name = "Target Loading at the MA Border (kg N/yr)") +
+  scale_y_continuous(
+    trans = "pseudo_log",
+    name = "Annualized Spending", 
+    breaks = c(0, 100, 10000, 1000000, 100000000), 
+    labels = c("$0", "$100", "$10,000", "$1,000,000", "$100,000,000")
+  ) +
+  scale_color_brewer(palette = "Set3")
+
+print(BMPspending_urban_log)
+
+RiparianBMPspending <- ggplot(
+  BMPspending_summary_full %>% filter(BMP_Category == "Riparian Buffer BMPs"), 
+  aes(y = Total_Spent, x = N1, color = BMP, group = BMP)
+) + 
+  geom_point(alpha = 0.5, size = 2) +
+  geom_smooth(lwd = 2, se = FALSE) +
+  scale_x_continuous(
+    name = "Target Loading at the MA Border (kg N/yr)",
+    limits = c(min(bootstrap.summary$N1), max(bootstrap.summary$N1))
+  ) +
+  scale_y_continuous(
+    name = "Annualized Spending", 
+    breaks = c(0, 1000000, 2000000, 3000000), 
+    labels = c("$0", "$1,000,000", "$2,000,000", "$3,000,000")
+  ) +
+  scale_color_brewer(palette = "Set1")
+
+print(RiparianBMPspending)
+```
+
+```{r code for choosing BMPs to display}
+BMPspending_summary_full %>%
+  group_by(BMP) %>%
+  summarise(
+    mean_spent = mean(Total_Spent),
+    # BMP_Category = case_when(
+    #   BMP_Category == "Urban BMPs" ~ "Urban BMPs",
+    #   BMP_Category %in% c(
+    #     "Agricultural BMPs", "Point Source BMPs", "Riparian Buffer BMPs"
+    #     ) ~ "Agricultural, Point Source or Riparaian Buffer BMPs"
+    # )
+  ) %>%
+  arrange(desc(mean_spent))
+```
+
+```{r BMP spending plots}
+
+BMPSpending <- ggplot(
+  BMPspending_summary_full %>%
+    group_by(BMP) %>%
+    mutate(
+      mean_spent = mean(Total_Spent),
+      # BMP_Category = case_when(
+      #   BMP_Category == "Urban BMPs" ~ "Urban BMPs",
+      #   BMP_Category %in% c(
+      #     "Agricultural BMPs", "Point Source BMPs", "Riparian Buffer BMPs"
+      #     ) ~ "Agricultural, Point Source or Riparaian Buffer BMPs"
+      # )
+    ) %>%
+    filter(
+      BMP %in% c(
+        "WWTP_upgrades",
+        "Grassed_Buffer",
+        "Forested_Buffer",
+        "Infiltration_Basin",
+        "Infiltration_Trench",
+        "Gravel_Wetland",
+        "Porous_Pavement_w_subsurface_infiltration",
+        "Ponds",
+        "Filterstrip",
+        "Waterway_Only",
+        "Terrace_Waterway"
+      )
+    )
+  , 
+  aes(y = Total_Spent / 1000000, x = N1 / 1000000, group = BMP, color = BMP)
+) + 
+  geom_point(size = 2, alpha = 0.3) +
+  geom_smooth(lwd = 2, se = FALSE) +
+  scale_x_continuous(name = "Target Loading at the MA Border (x 1,000,000 kg N/yr)") +
+  scale_y_continuous(
+    trans = "identity",
+    name = "Annualized Spending (x $1,000,000)"
+  ) +
+  facet_wrap(facets = "BMP_Category", scales = "free") +
+  scale_color_brewer(palette = "Set3") +
+  theme(legend.position = "bottom") 
+
+print(BMPSpending)
+
+BMPspending_targetag <- ggplot(
+  BMPspending_summary_full %>% filter(BMP_Category == "Agricultural BMPs"), 
+  aes(y = Total_Spent, x = cost, color = BMP, group = BMP)
+) + 
+  geom_smooth(lwd = 2, se = FALSE) +
+  geom_point(alpha = 0.5) +
+  scale_x_log10(
+    name = "Annualized Cost",
+    breaks = c(100000, 1000000, 10000000, 100000000), 
+    minor_breaks = c(
+      100000, 
+      200000,
+      300000,
+      400000,
+      500000,
+      600000,
+      700000,
+      800000,
+      900000,
+      1000000,
+      2000000,
+      3000000,
+      4000000,
+      5000000,
+      6000000,
+      7000000,
+      8000000,
+      9000000,
+      10000000,
+      20000000,
+      30000000,
+      40000000,
+      50000000,
+      60000000,
+      70000000,
+      80000000,
+      90000000,
+      100000000,
+      200000000,
+      300000000,
+      400000000,
+      500000000,
+      600000000,
+      700000000,
+      800000000,
+      900000000
+    ),
+    labels = c("", "$1,000,000", "", "$100,000,000"),
+  ) +
+  theme_bw() +
+  scale_y_continuous(
+    name = "Annualized Spending", 
+    breaks = c(0, 2000000, 4000000, 6000000), 
+    labels = c("$0", "$2,000,000", "$4,000,000", "$6,000,000")
+  ) +
+  scale_color_brewer(palette = "Set3")
+
+print(BMPspending_targetag)
+
+BMPspending_targetpoint <- ggplot(
+  BMPspending_summary_full %>% filter(BMP_Category == "Point Source BMPs"), 
+  aes(y = Total_Spent, x = cost, color = BMP, group = BMP)
+) + 
+  geom_smooth(lwd = 2, se = FALSE) +
+  geom_point(alpha = 0.5) +
+  scale_x_log10(
+    name = "Annualized Cost",
+    breaks = c(100000, 1000000, 10000000, 100000000), 
+    minor_breaks = c(
+      100000, 
+      200000,
+      300000,
+      400000,
+      500000,
+      600000,
+      700000,
+      800000,
+      900000,
+      1000000,
+      2000000,
+      3000000,
+      4000000,
+      5000000,
+      6000000,
+      7000000,
+      8000000,
+      9000000,
+      10000000,
+      20000000,
+      30000000,
+      40000000,
+      50000000,
+      60000000,
+      70000000,
+      80000000,
+      90000000,
+      100000000,
+      200000000,
+      300000000,
+      400000000,
+      500000000,
+      600000000,
+      700000000,
+      800000000,
+      900000000
+    ),
+    labels = c("", "$1,000,000", "", "$100,000,000"),
+  ) +
+  theme_bw() +
+  scale_y_continuous(
+    name = "Annualized Spending", 
+    breaks = c(0, 100000, 200000, 300000, 400000), 
+    labels = c("$0", "100,000", "$200,000", "$300,000", "$400,000")
+  ) +
+  scale_color_brewer(palette = "Set2")
+
+print(BMPspending_targetpoint)
+
+BMPspending_targeturban <- ggplot(
+  BMPspending_summary_full %>% filter(BMP_Category == "Urban BMPs" & BMP != "Grass_Swale_w_detention"), # Grass_Swale_w_detention is underused, and otherwise I run out of colors
+  aes(y = Total_Spent, x = cost, color = BMP, group = BMP)
+) + 
+  geom_point(size = 2) +
+  geom_smooth(lwd = 2, se = FALSE) +
+  scale_x_log10(
+    name = "Annualized Cost",
+    breaks = c(100000, 1000000, 10000000, 100000000), 
+    minor_breaks = c(
+      100000, 
+      200000,
+      300000,
+      400000,
+      500000,
+      600000,
+      700000,
+      800000,
+      900000,
+      1000000,
+      2000000,
+      3000000,
+      4000000,
+      5000000,
+      6000000,
+      7000000,
+      8000000,
+      9000000,
+      10000000,
+      20000000,
+      30000000,
+      40000000,
+      50000000,
+      60000000,
+      70000000,
+      80000000,
+      90000000,
+      100000000,
+      200000000,
+      300000000,
+      400000000,
+      500000000,
+      600000000,
+      700000000,
+      800000000,
+      900000000
+    ),
+    labels = c("", "$1,000,000", "", "$100,000,000"),
+  ) +
+  theme_bw() +
+  scale_y_continuous(
+    name = "Annualized Spending", 
+    breaks = c(0, 100000000, 200000000, 300000000, 400000000), 
+    labels = c("$0", "$100,000,000", "$200,000,000", "$300,000,000", "$400,000,000")
+  ) +
+  scale_color_brewer(palette = "Set3")
+
+print(BMPspending_targeturban)
+
+BMPspending_targetripbuf <- ggplot(
+  BMPspending_summary_full %>% filter(BMP_Category == "Riparian Buffer BMPs"), 
+  aes(y = Total_Spent, x = cost, color = BMP, group = BMP)
+) + 
+  geom_point(alpha = 0.5, size = 2) +
+  geom_smooth(lwd = 2, se = FALSE) +
+  scale_x_log10(
+    name = "Annualized Cost",
+    breaks = c(100000, 1000000, 10000000, 100000000), 
+    minor_breaks = c(
+      100000, 
+      200000,
+      300000,
+      400000,
+      500000,
+      600000,
+      700000,
+      800000,
+      900000,
+      1000000,
+      2000000,
+      3000000,
+      4000000,
+      5000000,
+      6000000,
+      7000000,
+      8000000,
+      9000000,
+      10000000,
+      20000000,
+      30000000,
+      40000000,
+      50000000,
+      60000000,
+      70000000,
+      80000000,
+      90000000,
+      100000000,
+      200000000,
+      300000000,
+      400000000,
+      500000000,
+      600000000,
+      700000000,
+      800000000,
+      900000000
+    ),
+    labels = c("", "$1,000,000", "", "$100,000,000"),
+  ) +
+  theme_bw() +
+  scale_y_continuous(
+    name = "Annualized Spending", 
+    breaks = c(0, 2000000, 4000000, 6000000), 
+    labels = c("$0", "$2,000,000", "$4,000,000", "$6,000,000")
+  ) +
+  scale_color_brewer(palette = "Set1")
+
+print(BMPspending_targetripbuf)
+```
+
+```{r code for discussion text}
+ggplot(
+  BMPspending_summary_full %>% 
+    filter(BMP_Category == "Urban BMPs") %>%
+    group_by(bootstrap) %>%
+    summarize(
+      urban_cost = sum(Total_Spent), 
+      total_cost = mean(cost), 
+      frac_urb = urban_cost / total_cost
+    ),
+  aes(x = frac_urb)
+) +
+  geom_histogram()
+
+ggplot(
+  BMPspending_summary_full %>% 
+    filter(BMP_Category == "Urban BMPs") %>%
+    group_by(bootstrap) %>%
+    summarize(
+      urban_cost = sum(Total_Spent), 
+      total_cost = mean(cost), 
+      frac_urb = urban_cost / total_cost
+    ),
+  aes(x = total_cost, y = urban_cost)
+) +
+  geom_point() +
+  geom_abline(color = "gray20", lty = 2)
+
+summary(
+  with(  
+    BMPspending_summary_full %>% 
+      filter(BMP_Category == "Urban BMPs") %>%
+      group_by(bootstrap) %>%
+      summarize(
+        urban_cost = sum(Total_Spent), 
+        total_cost = mean(cost), 
+        frac_urb = urban_cost / total_cost
+      ),
+    lm(urban_cost ~ total_cost)
+  )
+)
+```
+
+
+```{r save parse BMP decisions output plots}
+ggsave(
+  "UserGuideFig5-4.png",
+  plot = AgBMPSpending,
+  path = "./ManuscriptFigures/",
+  height = 4,
+  width = 6,
+  units = "in"
+)
+
+
+ggsave(
+  "UserGuideFig5-3.png",
+  plot = PointBMPSpending,
+  path = "./ManuscriptFigures/",
+  height = 4,
+  width = 6,
+  units = "in"
+)
+
+
+ggsave(
+  "UserGuideFig5-5.png",
+  plot = UrbanBMPSpending,
+  path = "./ManuscriptFigures/",
+  height = 4,
+  width = 7,
+  units = "in"
+)
+
+
+ggsave(
+  "UserGuideFig5-6.png",
+  plot = RiparianBMPspending,
+  path = "./ManuscriptFigures/",
+  height = 4,
+  width = 6,
+  units = "in"
+)
+
+ggsave(
+  "Fig5.pdf",
+  plot = BMPSpending,
+  path = "./ManuscriptFigures/",
+  height = 6,
+  width = 6,
+  units = "in",
+  useDingbats = FALSE
+)
+```
+
+
+```{r parse urban user specs}
+begin.urb.maxmin <- which(grepl(pattern = "urban_frac_max_rev", x = dat$V1))
+begin.urb.dd <- which(grepl(pattern = "urban_design_depth_rev", x = dat$V1))
+
+fracmax <- foreach(i = 1:length(begin.urb.maxmin), .combine= "rbind") %do% {
+  tmp <- dat[
+    (begin.urb.maxmin[i] + 1):
+      (
+        BMP.end.rows[
+          min(which((unname(BMP.end.rows) - begin.urb.maxmin[i]) > 0))
+        ] - 1
+      ), 1
+  ]$V1
+  dat.tmp <- data.frame(str_split_fixed(string = tmp, pattern = "[ \t]+", n = 3)) %>%
+    rename(BMP = X1, frac_min = X2, frac_max = X3) %>%
+    mutate(bootstrap = i, frac_max = as.numeric(frac_max)) %>%
+    filter(
+      BMP %in% c(
+        "Infiltration_Basin", 
+        "Infiltration_Chamber",
+        "Infiltration_Trench",
+        "Porous_Pavement_w_subsurface_infiltration",
+        "Enhanced_Biofiltration_w_ISR", 
+        "Gravel_Wetland",
+        "Wet_Pond"
+      )
+    ) 
+  
+  dat.tmp
+} %>%
+  pivot_wider(
+    id_cols = bootstrap, 
+    names_from = BMP,
+    values_from = frac_max, 
+    names_prefix = "frac_max_"
+  )
+
+urb_dd <- foreach(i = 1:length(begin.urb.dd), .combine= "rbind") %do% {
+  tmp <- dat[
+    (begin.urb.dd[i] + 1):
+      (
+        BMP.end.rows[
+          min(which((unname(BMP.end.rows) - begin.urb.dd[i]) > 0))
+        ] - 1
+      ), 1
+  ]$V1
+  dat.tmp <- data.frame(str_split_fixed(string = paste0(" ", tmp), pattern = "[ \t]+", n = 3)) %>%
+    rename(BMP = X2, designdepth = X3) %>%
+    mutate(bootstrap = i, designdepth = as.numeric(designdepth)) %>%
+    filter(
+      BMP %in% c(
+        "Infiltration_Basin", 
+        "Infiltration_Chamber",
+        "Infiltration_Trench",
+        "Porous_Pavement_w_subsurface_infiltration",
+        "Enhanced_Biofiltration_w_ISR", 
+        "Gravel_Wetland",
+        "Wet_Pond"
+      )
+    ) 
+  
+  dat.tmp
+} %>%
+  pivot_wider(
+    id_cols = bootstrap, 
+    names_from = BMP,
+    values_from = designdepth, 
+    names_prefix = "designdepth_"
+  )
+
+BMPspending_summary_fuller <- merge(
+  x = merge(x = urb_dd, y = fracmax, by = "bootstrap"),
+  y = BMPspending_summary_full, 
+  by = "bootstrap"
+)
+
+UrbanBMPSpending_newview <- ggplot(
+  BMPspending_summary_fuller %>% 
+    filter(BMP_Category == "Urban BMPs" & BMP != "Grass_Swale_w_detention") %>%
+    mutate(group = ntile(designdepth_Infiltration_Trench, 3)), # Grass_Swale_w_detention is underused, and otherwise I run out of colors
+  aes(y = Total_Spent, x = N1, color = BMP, group = BMP)
+) + 
+  geom_point(size = 2) +
+  geom_smooth(lwd = 2, se = FALSE) +
+  scale_x_continuous(name = "") +
+  scale_y_continuous(
+    name = "Annualized Spending", 
+    breaks = c(0, 15000000, 30000000, 45000000, 60000000), 
+    labels = c("$0", "$15,000,000", "$30,000,000", "$45,000,000", "$60,000,000")
+  ) +
+  scale_color_brewer(palette = "Set3") +
+  facet_wrap("group") + 
+  theme(legend.position = "bottom")
+
+print(UrbanBMPSpending_newview)
+```
+
+```{r parse riparian user specs}
+
+begin.ripbuf.maxmin <- which(grepl(pattern = "ripbuf_frac_max_rev", x = dat[,1]$V1))
+
+fracmax.rb <- foreach(i = 1:length(begin.ripbuf.maxmin), .combine= "rbind") %do% {
+  tmp <- dat[
+    (begin.ripbuf.maxmin[i] + 1):
+      (
+        BMP.end.rows[
+          min(which((unname(BMP.end.rows) - begin.ripbuf.maxmin[i]) > 0))
+        ] - 1
+      ), 1
+  ]$V1
+  dat.tmp <- data.frame(str_split_fixed(string = tmp, pattern = "[ \t]+", n = 3)) %>%
+    rename(BMP = X1, frac_min = X2, frac_max = X3) %>%
+    mutate(bootstrap = i, frac_max = as.numeric(frac_max))
+  
+  dat.tmp
+} %>%
+  pivot_wider(
+    id_cols = bootstrap, 
+    names_from = BMP,
+    values_from = frac_max, 
+    names_prefix = "frac_max_"
+  )
+
+BMPspending_summary_fullest <- merge(
+  x = BMPspending_summary_fuller, y = fracmax.rb, by = "bootstrap"
+)
+
+RipBufBMPSpending_newview <- ggplot(
+  BMPspending_summary_fullest %>% 
+    filter(BMP_Category == "Riparian Buffer BMPs") %>%
+    mutate(group = ntile(frac_max_Grassed_Buffer, 3)), # Grass_Swale_w_detention is underused, and otherwise I run out of colors
+  aes(y = Total_Spent, x = N1, color = BMP, group = BMP)
+) + 
+  geom_point(size = 2) +
+  geom_smooth(lwd = 2, se = FALSE) +
+  scale_x_continuous(name = "") +
+  scale_y_continuous(
+    name = "Annualized Spending", 
+    breaks = c(0, 15000000, 30000000, 45000000, 60000000), 
+    labels = c("$0", "$15,000,000", "$30,000,000", "$45,000,000", "$60,000,000")
+  ) +
+  scale_color_brewer(palette = "Set1") +
+  facet_wrap("group") + 
+  theme(legend.position = "bottom")
+
+print(RipBufBMPSpending_newview)
+```
+
+## Parse which WWTPs are being upgraded
+
+```{r write modified command script}
+prev_cmdfile <- read.table(
+  file = paste(AMPLscriptsfolder, "STcommand_globalsens.amp", sep=""), 
+  header = FALSE,
+  sep = "\n",
+  quote = ""
+)
+prev_cmdfilecut <- data.frame(V1 = prev_cmdfile[-nrow(prev_cmdfile),])
+
+write.table(
+  prev_cmdfilecut,
+  file = paste(AMPLscriptsfolder, "STcommand_WWTP_globalsens.amp", sep = "") , 
+  sep = "\t",
+  row.names = F,
+  col.names = F,
+  na = "",
+  quote = F
+)
+
+write(
+  paste0("\n display point_dec; \n };"), 
+  file =  paste(AMPLscriptsfolder, "STcommand_WWTP_globalsens.amp", sep = ""),
+  append = T
+)
+```
+
+```{r send WWTP AMPL scripts to solver}
+
+tmp <-my_NgetSolverTemplate(
+  category = "lp", solvername = "CPLEX", inputMethod = "AMPL"
+)
+## setting path to model and data files
+modf <- paste0(
+  AMPLscriptsfolder, 
+  "STmodel_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".mod"
+)
+datf <- paste0(
+  AMPLscriptsfolder, 
+  "STdata_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".dat"
+)
+comf <- paste0(
+  AMPLscriptsfolder, 
+  "STcommand_WWTP_globalsens", 
+  if(!default_parameters){paste0("_", parameter_tag)}, 
+  ".amp"
+)
+
+## enter email & comments
+email <- "chamberlin.catherine@epa.gov"
+
+comments <- paste(
+  "global sensitivity test",
+  if(!default_parameters){paste0("(subtext ", parameter_tag, ")")}, 
+  "with", 
+  nbootstraps,
+  "bootstraps. Testing WWTP implementation"
+)
+## import file contents
+modc <- paste(paste(readLines(modf), collapse = "\n"), "\n")
+datc <- paste(paste(readLines(datf), collapse = "\n"), "\n")
+comc <- paste(paste(readLines(comf), collapse = "\n"), "\n")
+
+## create list object
+argslist <- list(
+  model = modc, data = datc, commands = comc, comments = comments, email = email
+)
+## create XML string
+xmls <- CreateXmlString(neosxml = tmp, cdatalist = argslist)
+
+## Submit job
+job.xml.text <- NsubmitJob(
+  xmlstring = xmls, user = "rneos", interface = "", id = 0
+)
+
+## Retrieve results
+resultfile <- NgetFinalResults(obj = job.xml.text, convert = TRUE)
+write.table(
+  resultfile@ans, 
+  file = paste0(
+    NEOSresults,
+    "NEOS_result_WWTP_globalsens",
+    nbootstraps,
+    "bs", 
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".txt"
+  )
+)
+```
+
+```{r load WWTP file}
+
+dat <- fread(
+  paste0(
+    NEOSresults,
+    "NEOS_result_WWTP_globalsens",
+    nbootstraps,
+    "bs", 
+    if(!default_parameters){paste0("_", parameter_tag)}, 
+    ".txt"
+  ),
+  fill = TRUE,
+  skip = 2,
+  sep = "\t", 
+  sep2 = "\n"
+) %>%
+  rename(V1 = 1)
+
+```
+
+```{r parse BMP decisions}
+
+end.rows <- which(sapply(dat$V1, grepl, pattern = ";"))
+bootstrapset_begin <- which(
+  sapply(dat$V1, grepl, pattern = "set Bootstraps :=")
+)
+bootstrapset_end <- end.rows[min(which(end.rows >= bootstrapset_begin))]
+str_extract(
+  paste(dat[bootstrapset_begin:bootstrapset_end,], collapse = " "),
+  ".*?([0-9]+).*"
+)
+n_bootstraps <- paste(
+  dat[bootstrapset_begin:bootstrapset_end,], collapse = " "
+) %>%
+  str_match_all("[0-9]+") %>%
+  unlist %>%
+  as.numeric %>%
+  max
+# n_bootstraps <- 5068
+
+solve.stati <- dat[which(sapply(dat$V1, grepl, pattern = "solve_result = ")),] 
+solve_results <- as.numeric(sapply(solve.stati, grepl, pattern = "solved"))
+
+cost.displays <- dat[which(sapply(dat$V1, grepl, pattern = "cost = ")),]$V1
+cost_results <- parse_number(as.character(cost.displays))
+
+loads_lim.displays <- data.frame(
+  str_split_fixed(
+    dat[which(sapply(dat$V1, grepl, pattern = "loads_lim_")),]$V1, " ", n = 3
+  )
+)
+names(loads_lim.displays) <- c("Target", "X", "Limit")
+
+loads_lim.summary <- loads_lim.displays %>%
+  mutate(
+    Target = gsub("loads_lim_", "", gsub("_rev", "", Target)),
+    Limit = as.numeric(Limit),
+    bootstrap = foreach(i = 1:n_bootstraps, .combine = "c") %do% {rep(i, 3)}
+  ) %>%
+  pivot_wider(id_cols = bootstrap, names_from = Target, values_from = Limit)
+
+bootstrap.summary <- data.frame(
+  loads_lim.summary,
+  solve_result = solve_results,
+  cost = cost_results
+) %>%
+  mutate(
+    cost = case_when(solve_results == 0 ~ NA_real_, solve_results == 1 ~ cost)
+  )
+
+ggplot(
+  bootstrap.summary, aes(x = N1, y = solve_results)
+) + 
+  geom_point(size = 3, alpha = 0.1) +
+  labs(x = "Target Loading at the MA Border (kg N/yr)", y = "Model Success")
+
+BMPdescriptions_begin <- which(sapply(dat$V1, grepl, pattern = "sum[{]c in comid_all[}]"))
+which_point <- grep("point", dat[BMPdescriptions_begin,]$V1)
+which_ag <- grep("ag", dat[BMPdescriptions_begin,]$V1)
+which_urban <- grep("urban", dat[BMPdescriptions_begin,]$V1)
+which_ripbuf <- grep("ripbuf", dat[BMPdescriptions_begin,]$V1)
+BMP <- c()
+BMP[which_point] <- "point"
+BMP[which_ag] <- "ag"
+BMP[which_urban] <- "urban"
+BMP[which_ripbuf] <- "ripbuf"
+
+BMP.end.rows <- which(sapply(dat$V1, grepl, pattern = ";"))
+
+BMPdescriptions_end <- foreach(
+  i = 1:length(BMPdescriptions_begin), .combine = "c"
+) %do% {
+  if(i %in% which_point) {tmp <- BMPdescriptions_begin[i]} else {
+    tmp <- BMP.end.rows[min(which(BMP.end.rows > BMPdescriptions_begin[i]))]
+  }
+  tmp
+}
+
+point.dec.begin <- which(sapply(dat$V1, grepl, pattern = "point_dec "))
+point_descriptions_end <- foreach(
+  i = 1:length(point.dec.begin), .combine = "c"
+) %do% {
+  tmp <- BMP.end.rows[min(which(BMP.end.rows > point.dec.begin[i]))]
+  tmp
+}
+
+BMPspending_summary <- foreach(i = 1:length(BMPdescriptions_begin), .combine = "rbind") %do% {
+  tmp <- dat[BMPdescriptions_begin[i]:BMPdescriptions_end[i],1]$V1
+  if(i %in% which_point) {
+    bee <- as.numeric(str_split_fixed(tmp, " = ", n = 2)[2])
+    tmp.dat <- data_frame(bootstrap = ceiling(i / 4), BMP = "WWTP_upgrades", Total_Spent = bee)
+  } else if(length(tmp) > 2) {
+    tmp.clean <- str_split_fixed(parse_character(tmp[2:(length(tmp)-1)]), " ", n = 2)
+    BMP <- parse_character(tmp.clean[,1])
+    costs <- parse_number(tmp.clean[,2])
+    
+    tmp.dat <- data_frame(bootstrap = ceiling(i / 4), BMP = BMP, Total_Spent = costs)
+  } else {tmp.dat <- NULL}
+  tmp.dat
+}
+
+makeWWTPlist <- function(checklist) {
+  if("6089867" %in% checklist) {x <- "Ludlow,"} else {x <- "NA,"}
+  if("6090091" %in% checklist) {y <- "Springfield,"} else {y <- "NA,"}
+  if("9329438" %in% checklist) {z <- "Claremont,"} else {z <- "NA,"}
+  if("9336444" %in% checklist) {zz <- "Hanover"} else {zz <- "NA"}
+  xyzzz <- paste(x, y, z, zz)
+  return(xyzzz)
+}
+
+WWTPimp_summary <- as.data.frame(foreach(
+  i = 1:length(point.dec.begin), .combine = "rbind"
+) %do% {
+  tmp <- dat[point.dec.begin[i]:point_descriptions_end[i],1]$V1
+  if(length(tmp) > 2) {
+    pulledlist <- gsub("'", "", str_split_fixed(
+      parse_character(tmp[2:(length(tmp)-1)]), " ", n = 2
+    )[,1]
+    )
+    WWTPlist <- makeWWTPlist(pulledlist)
+    
+  } else {WWTPlist <- "NA, NA, NA, NA"}
+  data.frame(bootstrap = i, WWTPimps = WWTPlist)
+}
+) 
+
+
+BMPspending_summary_full <- BMPspending_summary %>%
+  full_join(., BMPspending_summary %>% expand(bootstrap, BMP)) %>%
+  mutate(
+    Total_Spent = case_when(
+      is.na(Total_Spent) ~ 0, !is.na(Total_Spent) ~ Total_Spent
+    ),
+    BMP_Category = case_when(
+      BMP %in% c("WWTP_upgrades") ~ "Point Source BMPs",
+      BMP %in% c("Grassed_Buffer", "Forested_Buffer") ~ "Riparian Buffer BMPs",
+      BMP %in% c("Biofiltration_w_Underdrain", "Bioretention_Basin", "Enhanced_Biofiltration_w_ISR", "Extended_Dry_Detention_Basin", "Grass_Swale_w_detention", "Gravel_Wetland", "Infiltration_Basin", "Infiltration_Chamber", "Infiltration_Trench", "Porous_Pavement_w_subsurface_infiltration", "Porous_Pavement_w_underdrain", "Sand_Filter_w_underdrain", "Wet_Pond") ~ "Urban BMPs",
+      BMP %in% c("Conservation", "Contour_Farming", "Fert_20", "Filterstrip", "Manure_Injection", "MIN_TILL", "Ponds", "Terrace_Only", "Terrace_Waterway", "Waterway_Only") ~ "Agricultural BMPs"
+    )
+  )%>%
+  left_join(., bootstrap.summary, by = "bootstrap") %>%
+  filter(solve_result == 1) %>%
+  left_join(., WWTPimp_summary, by = "bootstrap")
+
+ggplot(
+  BMPspending_summary_full %>%
+    group_by(BMP) %>%
+    mutate(
+      mean_spent = mean(Total_Spent),
+    )
+  , 
+  aes(y = Total_Spent / 1000000, x = N1 / 1000000, group = BMP, color = BMP)
+) + 
+  geom_point(size = 2, alpha = 0.3) +
+  geom_smooth(lwd = 2, se = FALSE) +
+  scale_x_continuous(name = "Target Loading at the MA Border (x 1,000,000 kg N/yr)") +
+  scale_y_continuous(
+    trans = "identity",
+    name = "Annualized Spending (x $1,000,000)"
+  ) +
+  facet_wrap(facets = "BMP_Category", scales = "free") +
+  theme(legend.position = "bottom") 
+
+WWTPspendingplot <- ggplot(
+  BMPspending_summary_full %>%
+    filter(BMP_Category == "Point Source BMPs"),
+  aes(
+    y = Total_Spent / 1000000, 
+    x = N1 / 1000000, 
+    color = WWTPimps,
+    size = WWTPimps,
+    shape = WWTPimps
+  )
+) + 
+  geom_point(size = 2, alpha = 0.3) +
+  scale_x_continuous(name = "Target Loading at the MA Border (x 1,000,000 kg N/yr)") +
+  scale_y_continuous(
+    trans = "identity",
+    name = "Annualized Spending (x $1,000,000)"
+  ) +
+  theme(legend.position = "bottom") +
+  scale_shape_manual(values = c(1:13))
+
+print(WWTPspendingplot)
+```
+
+

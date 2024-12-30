@@ -1,0 +1,116 @@
+*************************************************************
+
+   NEOS Server Version 6.0
+   Job#     : 14710411
+   Password : QEJhZGuD
+   User     : 
+   Solver   : lp:CPLEX:AMPL
+   Start    : 2024-11-08 12:11:32
+   End      : 2024-11-08 12:11:34
+   Host     : prod-sub-1.neos-server.org
+
+   Disclaimer:
+
+   This information is provided without any express or
+   implied warranty. In particular, there is no warranty
+   of any kind concerning the fitness of this
+   information for any particular purpose.
+
+   Announcements:
+*************************************************************
+You are using the solver cplexamp.
+
+%% COMMENTS %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+uncertainty = False case study
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+Checking ampl.mod for cplex_options...
+Checking ampl.com for cplex_options...
+Executing AMPL.
+processing data.
+processing commands.
+Executing on prod-exec-1.neos-server.org
+
+Presolve eliminates 1265 constraints and 1056 variables.
+Adjusted problem:
+2436 variables:
+	1363 binary variables
+	1073 linear variables
+1873 constraints, all linear; 5379 nonzeros
+	1873 inequality constraints
+1 linear objective; 1073 nonzeros.
+
+CPLEX 22.1.1.0: threads=4
+CPLEX 22.1.1.0: optimal integer solution; objective 3008435.91
+33 MIP simplex iterations
+0 branch-and-bound nodes
+solve_result_num = 2
+solve_result = solved
+
+cost.result = solved
+
+cost = 3008435.91
+
+point_dec [*,*];
+
+urban_frac [*,*]
+:                  Green_Roof  Porous_Pavement_w_UD    :=
+23989071_UIDU_C   0                 1
+23989071_URHD_C   0                 1
+23989071_URLD_C   0                 1
+23989071_URMD_C   0                 1
+23989073_UIDU_C   0                 1
+23989073_URHD_C   0                 1
+23989073_URLD_C   0                 1
+23989073_URMD_C   0                 1
+23989075_UIDU_C   0                 1
+23989075_URHD_C   0                 1
+23989075_URLD_C   0                 1
+23989079_UIDU_C   0                 1
+23989079_URHD_C   0                 1
+23989079_URLD_C   0                 1
+23989385_URLD_C   0.6634360829      0
+23989725_URHD_C   0                 1
+23989727_UIDU_C   0                 1
+23989727_URHD_C   0                 1
+23990227_UIDU_C   0                 1
+23990227_URHD_C   0                 1
+23990227_URLD_C   0                 1
+23990227_URMD_C   0                 1
+23990257_UIDU_C   0                 1
+23990257_URHD_C   0                 1
+23990257_URLD_C   0                 1
+23990257_URMD_C   0                 0.4842425789
+23990259_URLD_C   0                 1
+23990259_URMD_C   0                 1
+23990261_UIDU_C   0                 1
+23990261_URHD_C   0                 1
+23990261_URLD_C   0                 1
+23990261_URMD_C   0                 1
+23990263_URHD_C   0                 1
+23990263_URLD_C   0                 1
+23990269_UIDU_C   0                 1
+23990269_URHD_C   0                 1
+23990269_URLD_C   0                 1
+23990269_URMD_C   0                 1
+23990391_UIDU_C   0                 1
+23990391_URHD_C   0                 1
+23990391_URLD_C   0                 0.2753415931
+23990417_UIDU_C   0                 1
+23990417_URHD_C   0                 1
+23990453_URMD_C   0                 1
+23990459_URHD_C   0                 1
+23990707_UIDU_C   0                 1
+23990785_URMD_C   0                 1
+23990967_URLD_C   1                 0
+;
+
+road_frac [*,*];
+
+ag_frac [*,*];
+
+graz_frac [*,*];
+
+ripbuf_length [*,*]
+:          Forested_Buffer    :=
+'23990263'     3671.1843
+;

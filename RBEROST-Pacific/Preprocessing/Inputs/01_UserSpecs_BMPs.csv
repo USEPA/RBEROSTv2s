@@ -1,0 +1,48 @@
+BMP_Category,BMP,BMP_Selection,frac_min,frac_max,capital_WA,operations_WA,capital_units,operations_units,Min_width_ft,Max_width_ft,UserSpec_width_ft,TileDrainRestricted,notes
+ag,Conservation,X,0,1,33.43,0,ac,ac,NA,NA,NA,,
+ag,Contour_Farming,X,0,1,8.42,0,ac,ac,NA,NA,NA,,
+ag,Fert_75,X,0,1,17.13,0,ac,ac,NA,NA,NA,,Using general nutrient management cost data as placeholder
+ag,Fert_90,X,0,1,17.13,0,ac,ac,NA,NA,NA,,Using general nutrient management cost data as placeholder
+ag,Filterstrip,X,0,1,3.7234,0,ac,ac,NA,NA,NA,,"Assumes native species. If introduced species, override."
+ag,MIN_TILL,X,0,1,27.27,0,ac,ac,NA,NA,NA,,
+ag,Terrace_Waterway,X,0,1,0.01513,0,ft2,ft2,NA,NA,NA,,
+ag,Terrace_Only,X,0,1,0.0137,0,ft2,ft2,NA,NA,NA,,
+ag,Waterway_Only,X,0,1,0.00143,0,ft2,ft2,NA,NA,NA,,
+ag,Grade_Stabilization,X,0,1,96.62049,0,ac,ac,NA,NA,NA,,
+ag,Diversion,X,0,1,1492.28,0,ac,ac,NA,NA,NA,,
+ag,Cover_Crops,X,0,1,51.52,0,ac,ac,NA,NA,NA,,
+ag,Drainage_Management,X,0,1,8607.56,0,ac,ac,NA,NA,NA,X,Will only be applied on tile drained land
+ag,Manure_Injection,X,0,1,29.71,0,ac,ac,NA,NA,NA,,
+ag,CustomAgBMP1,,0,1,NA,NA,NA,NA,NA,NA,NA,,
+ag,CustomAgBMP2,,0,1,NA,NA,NA,NA,NA,NA,NA,,
+ag,CustomAgBMP3,,0,1,NA,NA,NA,NA,NA,NA,NA,,
+urban,Extended_Dry_Detention_Basin,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+urban,Grass_Swale_w_D,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+urban,Green_Roof,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+urban,Infiltration_Basin,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+urban,Infiltration_Chamber,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+urban,Infiltration_Trench,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+urban,Permeable_Pavement,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs. Note: literature results on the efficiency of this BMP show it to be ineffective in NH
+urban,Porous_Pavement_w_UD,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,"Note: different depth type - ""depth of filter course area in inches"". NH specifies filter course depths of 8-12""."
+urban,Sand_Filter_w_UD,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+urban,Wet_Pond,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+point,Fourstage_Bardenpho,X,NA,NA,varies,varies,flat,flat,NA,NA,NA,NA,Costs vary by plant type and plant size. See WWTP_Costs.csv.
+point,Chem_add,X,NA,NA,varies,varies,flat,flat,NA,NA,NA,NA,Costs vary by plant type and plant size. See WWTP_Costs.csv.
+point,Denitrification_filters,X,NA,NA,varies,varies,flat,flat,NA,NA,NA,NA,Costs vary by plant type and plant size. See WWTP_Costs.csv.
+point,Tertiary_filters,X,NA,NA,varies,varies,flat,flat,NA,NA,NA,NA,Costs vary by plant type and plant size. See WWTP_Costs.csv.
+point,MeOH_addition,X,NA,NA,varies,varies,flat,flat,NA,NA,NA,NA,Costs vary by plant type and plant size. See WWTP_Costs.csv.
+point,Membrane_bioreactors,X,NA,NA,varies,varies,flat,flat,NA,NA,NA,NA,Costs vary by plant type and plant size. See WWTP_Costs.csv.
+point,Modified_Ludzack_Ettinger,X,NA,NA,varies,varies,flat,flat,NA,NA,NA,NA,Costs vary by plant type and plant size. See WWTP_Costs.csv.
+point,Sequencing_batch_reactor,X,NA,NA,varies,varies,flat,flat,NA,NA,NA,NA,Costs vary by plant type and plant size. See WWTP_Costs.csv.
+ripbuf,Grassed_Buffer,X,0,1,0.0155,0.03,ft2,ft2,20,100,100,NA,
+ripbuf,Forested_Buffer,X,0,1,0.0425,0,ft2,ft2,20,100,100,NA,
+graz,Offsite_Water,X,0,1,29.76,0,ac,ac,NA,NA,NA,NA,
+road,Extended_Dry_Detention_Basin,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+road,Grass_Swale_w_D,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+road,Infiltration_Basin,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+road,Infiltration_Chamber,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+road,Infiltration_Trench,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+road,Permeable_Pavement,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs. Note: literature results on the efficiency of this BMP show it to be ineffective in NH
+road,Porous_Pavement_w_UD,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,"Note: different depth type - ""depth of filter course area in inches"". NH specifies filter course depths of 8-12""."
+road,Sand_Filter_w_UD,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs
+road,Wet_Pond,X,0,1,varies,varies,acre,acre,NA,NA,NA,NA,New development costs

@@ -1,0 +1,10 @@
+Category,BMP,N_Efficiency,P_Efficiency,N_Efficiency_se,P_Efficiency_se
+ag,Grade_Stabilization,0.75,0.75,0.075,0.075
+ag,Diversion,0.1,0.3,0.01,0.03
+ag,Cover_Crops,0.26,0.24,0.05,0.06
+ag,Drainage_Management,0.4484,0.5497,0.003,0.04
+ag,Manure_Injection,0.1013,0.4485,0.14,0.14
+graz,Offsite_Water,0.54,0.69,0.17,0.17
+ag,CustomAgBMP1,NA,NA,NA,NA
+ag,CustomAgBMP2,NA,NA,NA,NA
+ag,CustomAgBMP3,NA,NA,NA,NA

@@ -1,0 +1,236 @@
+ 
+#WMOST Optimization Screening Tool AMPL command file with uncertainty
+
+option display_transpose -10000;
+
+
+display loads_lim_N1;
+display loads_lim_N2;
+display loads_lim_N3;
+display loads_lim_P4;
+for {i in Scenarios} {
+
+if i > 1
+  then {
+  
+let loads_lim_N1:= loads_lim_N1 * 0.8;
+let loads_lim_N2:= loads_lim_N2 * 0.8;
+let loads_lim_N3:= loads_lim_N3 * 0.8;
+let loads_lim_P4:= loads_lim_P4 * 0.8;
+  };
+solve;
+
+for {s in Bootstraps} {
+
+repeat { 
+let other_loads_N1_rev[s] := Normal(other_loads_N1, 612.371432836281); 
+ } until other_loads_N1_rev[s] >= 0;
+repeat { 
+let other_loads_N2_rev[s] := Normal(other_loads_N2, 3720.22825011889); 
+ } until other_loads_N2_rev[s] >= 0;
+repeat { 
+let other_loads_N3_rev[s] := Normal(other_loads_N3, 3362.42188456181); 
+ } until other_loads_N3_rev[s] >= 0;
+repeat { 
+let other_loads_P4_rev[s] := Normal(other_loads_P4, 50.0036240884724); 
+ } until other_loads_P4_rev[s] >= 0;
+	let agcost_frac_rev[s] := Uniform(1,5/3);
+	 
+for {c in comid_N1} {
+for {l in loads_all} {
+repeat {
+let  baseloads_N1_rev[c,l,s] := Normal(baseloads_N1[c,l], baseloads_N1_se[c,l]);
+} until baseloads_N1_rev[c,l,s] >= 0;
+};
+for {b in ripbuf_bmp} {
+let riparianremoval_N1_rev[c,b,s] := Normal(riparianremoval_N1[c,b], riparianremoval_N1_se[c,b]);
+  };
+};
+for {c in comid_N2} {
+for {l in loads_all} {
+repeat {
+let  baseloads_N2_rev[c,l,s] := Normal(baseloads_N2[c,l], baseloads_N2_se[c,l]);
+} until baseloads_N2_rev[c,l,s] >= 0;
+};
+for {b in ripbuf_bmp} {
+let riparianremoval_N2_rev[c,b,s] := Normal(riparianremoval_N2[c,b], riparianremoval_N2_se[c,b]);
+  };
+};
+for {c in comid_N3} {
+for {l in loads_all} {
+repeat {
+let  baseloads_N3_rev[c,l,s] := Normal(baseloads_N3[c,l], baseloads_N3_se[c,l]);
+} until baseloads_N3_rev[c,l,s] >= 0;
+};
+for {b in ripbuf_bmp} {
+let riparianremoval_N3_rev[c,b,s] := Normal(riparianremoval_N3[c,b], riparianremoval_N3_se[c,b]);
+  };
+};
+for {c in comid_all_N} {
+  for {a in ag_bmp} {
+    repeat {
+      let ag_effic_N_rev[c,a,s] := Normal(ag_effic_N[c,a], ag_effic_N_se[c,a]);
+    } until ag_effic_N_rev[c,a,s] <= 1;
+  };
+  for {g in graz_bmp} {
+    repeat {
+      let graz_effic_N_rev[c,g,s] := Normal(graz_effic_N[c,g], graz_effic_N_se[c,g]);
+    } until graz_effic_N_rev[c,g,s] <= 1;
+  };
+  for {p in point_bmp} {
+    let point_effic_N_rev[c,p,s] := Normal(point_effic_N[c,p], abs(point_effic_N_se[c,p]) * 0.2);
+  };
+};
+for {x in urban_comid_all_N, u in urban_bmp} {
+    repeat {
+      let urban_effic_N_rev[x,u,s] := Normal(urban_effic_N[x,u], urban_effic_N_se[x,u]);
+    } until urban_effic_N_rev[x,u,s] <= 1;
+  };
+for {h in road_comid_all_N, r in road_bmp} {
+    repeat {
+      let road_effic_N_rev[h,r,s] := Normal(road_effic_N[h,r], road_effic_N_se[h,r]);
+    } until road_effic_N_rev[h,r,s] <= 1;
+  };  
+
+for {c in comid_P4} {
+for {l in loads_all} {
+repeat {
+let  baseloads_P4_rev[c,l,s] := Normal(baseloads_P4[c,l], baseloads_P4_se[c,l]);
+} until baseloads_P4_rev[c,l,s] >= 0;
+};
+for {b in ripbuf_bmp} {
+let riparianremoval_P4_rev[c,b,s] := Normal(riparianremoval_P4[c,b], riparianremoval_P4_se[c,b]);
+  };
+};
+for {c in comid_all_P} {
+  for {a in ag_bmp} {
+    repeat {
+      let ag_effic_P_rev[c,a,s] := Normal(ag_effic_P[c,a], ag_effic_P_se[c,a]);
+    } until ag_effic_P_rev[c,a,s] <=1;
+  };
+  for {g in graz_bmp} {
+    repeat {
+      let graz_effic_P_rev[c,g,s] := Normal(graz_effic_P[c,g], graz_effic_P_se[c,g]);
+    } until graz_effic_P_rev[c,g,s] <=1;
+  };
+  for {p in point_bmp} {
+    let point_effic_P_rev[c,p,s] := Normal(point_effic_P[c,p], abs(point_effic_P_se[c,p]) * 0.2);
+  };
+};
+for {x in urban_comid_all_P, u in urban_bmp} {
+    repeat {
+      let urban_effic_P_rev[x,u,s] := Normal(urban_effic_P[x,u], urban_effic_P_se[x,u]);
+    } until urban_effic_P_rev[x,u,s] <= 1;
+  };
+for {h in road_comid_all_P, r in road_bmp} {
+    repeat {
+      let road_effic_P_rev[h,r,s] := Normal(road_effic_P[h,r], road_effic_P_se[h,r]);
+    } until road_effic_P_rev[h,r,s] <= 1;
+  };
+    
+
+for {c in comid_all} {
+    
+  for {p in point_bmp} {
+    repeat {
+      let point_costs_capital_rev[c,p,s] := Normal(point_costs_capital[c,p] * 1.15, point_costs_capital[c,p] * 0.15);
+    } until point_costs_capital_rev[c,p,s] >= 0;
+    repeat {
+      let point_costs_operations_rev[c,p,s] := Normal(point_costs_operations[c,p] * 1.15, point_costs_operations[c,p] * 0.15);
+    } until point_costs_operations_rev[c,p,s] >= 0;
+  };
+  
+  for {b in ripbuf_bmp} {
+    repeat {
+      let ripbuf_costs_capital_rev[c,b,s] := Normal(ripbuf_costs_capital[c,b], ripbuf_costs_capital_se[c,b]);
+    } until ripbuf_costs_capital_rev[c,b,s] >= 0;
+    repeat { 
+      let ripbuf_costs_operations_rev[c,b,s] := Normal(ripbuf_costs_operations[c,b], ripbuf_costs_operations_se[c,b]);
+    } until ripbuf_costs_operations_rev[c,b,s] >= 0;
+  };
+  
+  for {ar in area_sub} {
+    repeat {
+      let area_rev[c,ar,s] := Normal(area[c,ar], area_se[c,ar]);
+    } until area_rev[c,ar,s] >= 0;
+  };
+  
+  for {a in ag_bmp} {
+    repeat {
+      let ag_costs_capital_rev[c,a,s] := Normal(ag_costs_capital[c,a], ag_costs_capital_se[c,a]);
+    } until ag_costs_capital_rev[c,a,s] >= 0;
+    repeat {
+      let ag_costs_operations_rev[c,a,s] :=  Normal(ag_costs_operations[c,a], ag_costs_operations_se[c,a]);
+    } until ag_costs_operations_rev[c,a,s] >= 0;
+  };
+  
+  for {g in graz_bmp} {
+    repeat {
+      let graz_costs_capital_rev[c,g,s] := Normal(graz_costs_capital[c,g], graz_costs_capital_se[c,g]);
+    } until graz_costs_capital_rev[c,g,s] >= 0;
+    repeat {
+      let graz_costs_operations_rev[c,g,s] :=  Normal(graz_costs_operations[c,g], graz_costs_operations_se[c,g]);
+    } until graz_costs_operations_rev[c,g,s] >= 0;
+  };
+  
+};
+
+for {x in urban_comid_all} {
+ for {ur in urban_area_sub} {
+    repeat {
+      let urban_area_rev[x,ur,s] := Normal(urban_area[x, ur], urban_area_se[x,ur]);
+    } until urban_area_rev[x,ur,s] >= 0;
+  };
+  
+ for {u in urban_bmp} {
+    repeat {
+	      let urban_costs_capital_rev[x,u,s] := Normal(urban_costs_capital[x,u], urban_costs_capital_se[x,u]);
+	  } until urban_costs_capital_rev[x,u,s] >= 0;
+	  repeat {
+	      let urban_costs_operations_rev[x,u,s] := Normal(urban_costs_operations[x,u], urban_costs_operations_se[x,u]);
+	  } until urban_costs_operations_rev[x,u,s] >= 0;
+	};
+ };
+
+for {h in road_comid_all} {
+  
+ for {r in road_bmp} {
+    repeat {
+	      let road_costs_capital_rev[h,r,s] := Normal(road_costs_capital[h,r], road_costs_capital_se[h,r]);
+	  } until road_costs_capital_rev[h,r,s] >= 0;
+	  repeat {
+	      let road_costs_operations_rev[h,r,s] := Normal(road_costs_operations[h,r], road_costs_operations_se[h,r]);
+	  } until road_costs_operations_rev[h,r,s] >= 0;
+	};
+ };
+};	
+
+option display_precision 10;
+display solve_result_num, solve_result;
+display cost.result;
+display cost;
+option display_1col 10000000000;
+option omit_zero_rows 1;
+option omit_zero_cols 1;
+
+display {s in Bootstraps} (sum {c in comid_all, p in point_bmp} (ps_coef_rev[c,p,s] * point_dec[c,p]) + sum {x in urban_comid_all, u in urban_bmp} (urban_coef_rev[x,u,s] * urban_frac[x,u]) + sum {h in road_comid_all, r in road_bmp} (road_coef_rev[h,r,s] * road_frac[h,r]) + sum {c in comid_all, a in ag_bmp} (ag_coef_rev[c,a,s] * ag_frac[c,a]) + sum {c in comid_all, g in graz_bmp} (graz_coef_rev[c,g,s] * graz_frac[c,g]) + sum {c in comid_all, b in ripbuf_bmp} (ripbuf_coef_rev[c,b,s] * ripbuf_length[c,b]));
+
+
+display {s in Bootstraps}  (other_loads_N1_rev[s] + sum {c in comid_N1} (baseloads_N1_rev[c,'ag',s] * (1 - sum {a in ag_bmp}(ag_effic_N_rev[c,a,s] * ag_frac[c,a]))) + sum {c in comid_N1} (baseloads_N1_rev[c,'graz',s] * (1 - sum {g in graz_bmp}(graz_effic_N_rev[c,g,s] * graz_frac[c,g]))) + sum {c in comid_N1} (baseloads_N1_rev[c,'urban',s] * (1 - sum {x in urban_comid_N1, u in urban_bmp : c == urban_comid_xwalk[x]}(urban_effic_N_rev[x,u,s] * urban_frac[x,u]))) + sum {c in comid_N1} (baseloads_N1_rev[c,'road',s] * (1 - sum {h in road_comid_N1, r in road_bmp : c == road_comid_xwalk[h]}(road_effic_N_rev[h,r,s] * road_frac[h,r]))) + sum {c in comid_N1} (baseloads_N1_rev[c,'point',s] * (1 - sum {p in point_bmp}(point_effic_N_rev[c,p,s] * point_dec[c,p]))) - sum {c in comid_N1, b in ripbuf_bmp} (ripbuf_length[c, b] * riparianremoval_N1_rev[c,b,s]));
+display {s in Bootstraps}  (other_loads_N2_rev[s] + sum {c in comid_N2} (baseloads_N2_rev[c,'ag',s] * (1 - sum {a in ag_bmp}(ag_effic_N_rev[c,a,s] * ag_frac[c,a]))) + sum {c in comid_N2} (baseloads_N2_rev[c,'graz',s] * (1 - sum {g in graz_bmp}(graz_effic_N_rev[c,g,s] * graz_frac[c,g]))) + sum {c in comid_N2} (baseloads_N2_rev[c,'urban',s] * (1 - sum {x in urban_comid_N2, u in urban_bmp : c == urban_comid_xwalk[x]}(urban_effic_N_rev[x,u,s] * urban_frac[x,u]))) + sum {c in comid_N2} (baseloads_N2_rev[c,'road',s] * (1 - sum {h in road_comid_N2, r in road_bmp : c == road_comid_xwalk[h]}(road_effic_N_rev[h,r,s] * road_frac[h,r]))) + sum {c in comid_N2} (baseloads_N2_rev[c,'point',s] * (1 - sum {p in point_bmp}(point_effic_N_rev[c,p,s] * point_dec[c,p]))) - sum {c in comid_N2, b in ripbuf_bmp} (ripbuf_length[c, b] * riparianremoval_N2_rev[c,b,s]));
+display {s in Bootstraps}  (other_loads_N3_rev[s] + sum {c in comid_N3} (baseloads_N3_rev[c,'ag',s] * (1 - sum {a in ag_bmp}(ag_effic_N_rev[c,a,s] * ag_frac[c,a]))) + sum {c in comid_N3} (baseloads_N3_rev[c,'graz',s] * (1 - sum {g in graz_bmp}(graz_effic_N_rev[c,g,s] * graz_frac[c,g]))) + sum {c in comid_N3} (baseloads_N3_rev[c,'urban',s] * (1 - sum {x in urban_comid_N3, u in urban_bmp : c == urban_comid_xwalk[x]}(urban_effic_N_rev[x,u,s] * urban_frac[x,u]))) + sum {c in comid_N3} (baseloads_N3_rev[c,'road',s] * (1 - sum {h in road_comid_N3, r in road_bmp : c == road_comid_xwalk[h]}(road_effic_N_rev[h,r,s] * road_frac[h,r]))) + sum {c in comid_N3} (baseloads_N3_rev[c,'point',s] * (1 - sum {p in point_bmp}(point_effic_N_rev[c,p,s] * point_dec[c,p]))) - sum {c in comid_N3, b in ripbuf_bmp} (ripbuf_length[c, b] * riparianremoval_N3_rev[c,b,s]));
+display {s in Bootstraps}  (other_loads_P4_rev[s] + sum {c in comid_P4} (baseloads_P4_rev[c,'ag',s] * (1 - sum {a in ag_bmp}(ag_effic_P_rev[c,a,s] * ag_frac[c,a]))) + sum {c in comid_P4} (baseloads_P4_rev[c,'graz',s] * (1 - sum {g in graz_bmp}(graz_effic_P_rev[c,g,s] * graz_frac[c,g]))) + sum {c in comid_P4} (baseloads_P4_rev[c,'urban',s] * (1 - sum {x in urban_comid_P4, u in urban_bmp : c == urban_comid_xwalk[x]}(urban_effic_P_rev[x,u,s] * urban_frac[x,u]))) + sum {c in comid_P4} (baseloads_P4_rev[c,'road',s] * (1 - sum {h in road_comid_P4, r in road_bmp : c == road_comid_xwalk[h]}(road_effic_P_rev[h,r,s] * road_frac[h,r]))) + sum {c in comid_P4} (baseloads_P4_rev[c,'point',s] * (1 - sum{p in point_bmp}(point_effic_P_rev[c,p,s] * point_dec[c,p]))) - sum {c in comid_P4, b in ripbuf_bmp} (ripbuf_length[c, b] * riparianremoval_P4_rev[c,b,s]));
+display point_dec;
+
+option display_1col 0;
+display ripbuf_length;
+
+option display_width 100000000000;
+display urban_frac;
+display road_frac;
+display ag_frac;
+display graz_frac;
+
+}
+
+

@@ -1,0 +1,5 @@
+"watershed_ID","watershed_name","adjusted_daily_target_kgperday","adjusted_annual_target_kgperyr","TN_or_TP","watershed_HUC","OutofNetworkFlag_X","Number"
+307,"Butler Cr",10.5280992941432,3842.75624236226,"TN",NA,NA,1
+379,"Bainbridge Island East",13.525487572802,4936.80296407274,"TN",NA,NA,2
+385,"Ellisport",19.3476033381017,7061.87521840712,"TN",NA,NA,3
+6,"Campbell Lake",0.868493150684931,317,"TP",NA,NA,4

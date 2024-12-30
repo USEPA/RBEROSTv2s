@@ -1,0 +1,141 @@
+---
+title: "Run RBEROST"
+date: "11/8/2024"
+output: html_document
+---
+
+## Configure R
+
+This code only needs to be run once, the first time you run RBEROST. It will install several R packages that RBEROST uses. Once run, you will not need to run this code again unless you update R, RStudio, or there are problems with installation. To run the code, click the green triangle "Run Current Chunk" below. If no green arrow appears, and instead there is a red square, click the red square to stop any ongoing processes and a green triangle should appear in its place. When clicked, the green triangle will turn into a red square until the code is finished.
+
+```{r configureR}
+
+packages <- c("tidyverse", "units", "dplyr", "measurements", "reshape2", "data.table", "stringr", "foreach", "shiny", "shinycssloaders", "tidygraph", "bit64", "beepr")
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+  }
+}
+invisible(
+  suppressPackageStartupMessages(
+    lapply(packages, library, character.only = TRUE)
+  )
+)
+
+```
+
+## Run Preprocessor
+
+To run the preprocessor, change any lines of code necessary and click the green triangle below. If no green arrow appears, and instead there is a red square, click the red square to stop any ongoing processes and a green triangle should appear in its place. When clicked, the green triangle will turn into a red square until the code is finished.
+
+```{r runpreprocessor}
+
+# This variable represents the location of input data files used to develop AMPL model files. If you opened RBEROST through the Tier_1_Optimization-SSWR_5_3_2.Rproj file, the '.' represents the folder where the Tier_1_Optimization-SSWR_5_3_2.Rproj file is located. If you did not open this file through the R project you may need to write out the full path to your RBEROST inputs.
+InPath<-paste0("./RBEROST-Pacific/Preprocessing/Inputs/")
+
+# This variable represents the location where AMPL model files will be printed for use on the NEOS server. If you opened RBEROST through the Tier_1_Optimization-SSWR_5_3_2.Rproj file, the '.' represents the folder where the Tier_1_Optimization-SSWR_5_3_2.Rproj file is located. If you did not open this file through the R project you may need to write out the full path to your RBEROST inputs.
+OutPath<-paste0("./RBEROST-Pacific/Preprocessing/Outputs/")
+
+# This variable represents the planning horizon in terms of years. Default is 15.
+horizon <- 15
+
+#This variable represents the selection of watersheds to run. Default is "All", which runs all targets for both Phosphorous and Nitrogen in Puget Sound. Setting MODE to "Select" will only run watersheds named under 'watershed_choices'.
+MODE <- "Select"
+
+#   [1] "Agate East"                                   "Agate West"                                   "Artondale"                                   
+#   [4] "Burley Cr"                                    "Butler Cr"                                    "Campbell Cr"                                 
+#   [7] "Chambers Cr"                                  "Coulter Cr"                                   "Cranberry Cr"                                
+#  [10] "Dana Passage North"                           "Dana Passage South"                           "Deer Cr"                                     
+#  [13] "Deschutes R/Capitol Lake"                     "Dutcher Cove"                                 "Ellis/Mission Cr"                            
+#  [16] "Filucy Bay"                                   "Frye Cove"                                    "Gallagher Cove"                              
+#  [19] "Glen Cove"                                    "Goldsborough Cr"                              "McCormick Cr"                                
+#  [22] "Grant East"                                   "Grant West"                                   "Green Cove"                                  
+#  [25] "Gull Harbor"                                  "Hale Passage"                                 "Henderson Inlet"                             
+#  [28] "Herron"                                       "Jarrel Cove"                                  "Johns Cr"                                    
+#  [31] "Kennedy/Schneider"                            "Ketron"                                       "Mable Taylor Cr"                             
+#  [34] "Mayo Cove"                                    "McAllister Cr"                                "McLane Cove"                                 
+#  [37] "McLane Cr"                                    "Mill Cr"                                      "Minter Cr"                                   
+#  [40] "Moxlie Cr"                                    "Nisqually R"                                  "Peale Passage"                               
+#  [43] "Perry Cr"                                     "Purdy Cr"                                     "Rocky Cr"                                    
+#  [46] "Rosedale"                                     "Schneider Cr"                                 "Sequalitchew Cr"                             
+#  [49] "Sherwood Cr"                                  "Skookum Cr"                                   "Snodgrass Cr"                                
+#  [52] "Sun Pt"                                       "Tolmie"                                       "Van Gelden"                                  
+#  [55] "Vaughn"                                       "Whitman Cove"                                 "Wilson Pt"                                   
+#  [58] "Woodard Cr"                                   "Woodland Cr"                                  "Young Cove"                                  
+#  [61] "Hylebos Cr"                                   "Puyallup R"                                   "Bainbridge Island West"                      
+#  [64] "Blackjack Cr"                                 "Chico Cr"                                     "Dyes Inlet"                                  
+#  [67] "Gorst Cr"                                     "Liberty Bay"                                  "Miller Bay"                                  
+#  [70] "Green R"                                      "Bainbridge Island East"                       "Buenna"                                      
+#  [73] "Green Valley Cr"                              "Curley Cr"                                    "Des Moines Cr"                               
+#  [76] "Ellisport"                                    "Federal Way"                                  "Gig Harbor"                                  
+#  [79] "Judd Cr"                                      "Kitsap NE"                                    "Lake Washington"                             
+#  [82] "Magnolia Bch"                                 "Maury Island"                                 "Miller Cr"                                   
+#  [85] "Olalla Cr"                                    "Saltwater St Pk"                              "Shingle Mill Cr"                             
+#  [88] "South Snohomish"                              "Tahlequah"                                    "University Place"                            
+#  [91] "Dabob Bay"                                    "Dosewallips"                                  "Duckabush"                                   
+#  [94] "Hamma Hamma"                                  "Kitsap/Hood"                                  "Lynch Cove"                                  
+#  [97] "NW Hood"                                      "Port Gamble"                                  "Quilcene"                                    
+# [100] "Skokomish"                                    "Tahuya"                                       "Skagit"                                      
+# [103] "Snohomish"                                    "Stillaguamish"                                "Whidbey east"                                
+# [106] "Port Townsend"                                "Whidbey west"                                 "Birch Bay"                                   
+# [109] "Lopez Island"                                 "Nooksack"                                     "Orcas Island"                                
+# [112] "Samish/Bell south"                            "San Juan Island"                              "Whatcom/Bell north"                          
+# [115] "Clallam Bay"                                  "Discovery Bay"                                "Dungeness"                                   
+# [118] "Elwha"                                        "North Olympic"                                "Port Angeles"                                
+# [121] "Sequim Bay"                                   "Ballinger Lake"                               "Erie Lake"                                   
+# [124] "Fenwick Lake"                                 "Loma Lake"                                    "Sawyer Lake"                                 
+# [127] "Campbell Lake"                                "Lake Whatcom - Agate Subwatershed"            "Lake Whatcom - Olsen Subwatershed"           
+# [130] "Lake Whatcom - Blodel Subwatershed"           "Lake Whatcom - Eagle Ridge Subwatershed"      "Lake Whatcom - North Shore Subwatershed"     
+# [133] "Lake Whatcom - Smith/Whatcom Subwatershed"    "Lake Whatcom - Oriental Subwatershed"         "Lake Whatcom - Cable Subwatershed"           
+# [136] "Lake Whatcom - Strawberry Subwatershed"       "Lake Whatcom - Sudden Valley Subwatershed"    "Lake Whatcom - Austin/Beaver Subwatershed"   
+# [139] "Lake Whatcom - Blue Canyon Subwatershed"      "Lake Whatcom - South Bay Subwatershed"        "Lake Whatcom - Anderson/Whatcom Subwatershed"
+# [142] "Lake Whatcom - Fir Subwatershed"              "Lake Whatcom - Brannian Subwatershed"         "Lake Whatcom - Carpenter Subwatershed"       
+# [145] "Lake Whatcom - Donovan Subwatershed"          "Lake Whatcom - Geneva Subwatershed"           "Lake Whatcom - Silver Beach Subwatershed"    
+# [148] "Lake Whatcom - Academy Subwatershed"          "Lake Whatcom - Hillsdale Subwatershed"
+
+# This variable determines what watersheds/targets will be included in the model.
+watershed_choices <- c("Butler Cr", "Bainbridge Island East", "Ellisport", "Campbell Lake")
+
+# This variable represents to expected interest rate. Default is 0.03, or 3%.
+interest_rate <- 0.03
+
+# This variable lets the user decide if they wish to consider agricultural BMP efficiencies of practices versus "No Practice" (a default of no conservation practices) or "Baseline" (a default of practices currently in place, and implementing a BMP will remove practices currently in place).
+AgBMPcomparison <- "No Practice"
+
+# This variable decides if you will run RBEROST with or without uncertainty. It can be TRUE or FALSE. Running with uncertainty takes longer than running without.
+IncludeUncertainty <- TRUE
+
+# If running RBEROST with uncertainty, how many scenarios would you like to view? Default is 3.
+n.scenarios <- 3 
+
+# If running RBEROST with uncertainty, how different would you like the scenarios to be? Each scenario will be solved for loading limits that are a certain percentage lower than the previous. Default is 0.20, or 20%.
+scenariostepchange <- 0.2
+
+# ----- Do not change anything below this line -------
+suppressWarnings({
+setwd("../")
+})
+source(
+  "./RBEROST-Pacific/R/01_Optimization_Preprocessing_gateway-Pacific.R",
+  local = TRUE
+  )
+beepr::beep()
+```
+
+## Run Postprocessor
+
+To run the postprocessor, click the green triangle below. A window will pop up either in RStudio or in your default web browser. If no green arrow appears, and instead there is a red square, click the red square to stop any ongoing processes and a green triangle should appear in its place. When clicked, the green triangle will turn into a red square until the code is finished. Be aware that simply closing the browser window will not stop the Shiny app. You must also click the red square below if you wish to relaunch the app.
+
+```{r runpostprocessor}
+setwd("../")
+source("./RBEROST-Pacific/R/02_Optimization_RunShiny-Pacific_ICF24_V5.R", local = TRUE)
+```
+
+
+
+
+
+
+
+
+

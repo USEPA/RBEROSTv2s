@@ -1,0 +1,1449 @@
+---
+title: "Local Sensitivity Analysis - adapted for Puget Sound"
+author: "Cathy Chamberlin, Kelly-Anne Moffa"
+date: "2/18/2021"
+output: html_document
+---
+
+### Adapted from LIS project for Puget Sound RBEROST - June 2024
+
+## Setup
+```{r setup, include=FALSE}
+packages <- c(
+  'data.table', 'tidyverse', 'foreach', 'rneos', 'doParallel', 'RColorBrewer'
+)
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+  }
+}
+invisible(
+  suppressPackageStartupMessages(
+    lapply(packages, library, character.only = TRUE)
+  )
+)
+theme_set(theme_classic())
+registerDoParallel()
+
+## update email
+email <- "kelly-anne.moffa@icf.com"
+
+```
+
+## Define functions
+```{r}
+my_savematch <- function(x, set, include = TRUE) {
+  if(include == TRUE) {
+    tmp <- x[which(x %in% set)]
+  } else if(include == FALSE) {
+    tmp <- x[which(!(x %in% set))]
+  }
+  
+  return(tmp)
+}
+
+options(RCurlOptions = list(ssl.verifypeer = FALSE))
+
+my_NgetSolverTemplate <- function (
+  category, solvername, inputMethod, nc = CreateNeosComm()
+) {
+  if (!(class(nc) == "NeosComm")) {
+    stop("\nObject provided for 'nc' must be of class 'NeosComm'.\n")
+  }
+  
+  call <- match.call()
+  
+  ans <- xml.rpc(
+    url = nc@url, 
+    method = "getSolverTemplate", 
+    .args = list(
+      category = category, solvername = solvername, inputMethod = inputMethod
+    ), 
+    .convert = TRUE, 
+    .opts = nc@curlopts, 
+    .curl = nc@curlhandle
+  )
+  
+  email.xmlcode <- "\n\n<email><![CDATA[...Insert Value Here...]]></email>"
+  
+  ans_rev <- if(
+    grepl("email", ans)
+  ) {
+    ans
+  } else {
+    paste0(
+      substr(ans, 1, nchar(ans)-13), 
+      email.xmlcode, 
+      substr(ans, (nchar(ans)-13), nchar(ans))
+    )
+  }
+  
+  xml <- xmlRoot(xmlTreeParse(ans_rev, asText = TRUE))
+  
+  res <- new("NeosXml", xml = xml, method = "getSolverTemplate",
+             call = call, nc = nc)
+  
+  return(res)
+}
+```
+
+## Set Filepath locations
+```{r set filepaths}
+InPath <- paste0("./Preprocessing/Inputs/")
+AMPLscriptsfolder <- "./Preprocessing/Outputs/"
+Sens_scriptsfolder <- "./SensitivityAnalysis/AMPLscripts/"
+NEOSresults <- "./SensitivityAnalysis/NEOSResults/"
+figureoutputs <- "./SensitivityAnalysis/"
+```
+
+## Load AMPL Model
+```{r}
+AMPLmod <- fread(paste0(AMPLscriptsfolder, "STmodel.mod"), fill = TRUE) %>% 
+  rename(X = 1)
+```
+
+
+## List all parameters to work with
+This chunk of code creates a table with all the parameters used in the model, and the sets that they are iterated over. Sets of comids are omitted, as we are going to assume changes to parameters occur uniformly across the watershed. There are 197 parameter/set member combinations to test.
+```{r}
+## list the sets that we are using for the sensitivity analysis
+## Sets of comids are omitted. There are thousands of them, so we will make the assumption that changes to parameters are uniform across the watershed. 
+set_lines <- AMPLmod[which(sapply(AMPLmod, grepl, pattern = "set"))]
+sets <- unlist(
+  lapply(
+    lapply(
+      lapply(
+        str_extract_all(set_lines, pattern = "(?<=set ).+?(?= :=)")[[1]], 
+        str_split_fixed, 
+        pattern = "within", 
+        n = 2
+      ), 
+      "[[", 
+      1
+    ), 
+    gsub, 
+    pattern = " ", 
+    replacement = ""
+  )
+)
+
+sets_toiterateover <- sets[which(!grepl("comid", sets))]
+sets_nottoiterateover <- sets[which(grepl("comid", sets))]
+## get members of the sets
+set_definition_lines <- AMPLmod[
+  which(sapply(AMPLmod, grepl, pattern = "set")) + 1
+]
+
+set_definitions <- lapply(set_definition_lines, str_extract_all, pattern = "(?<=\\{).+?(?=\\})")
+set_members_toiterateover <- set_definitions$X[which(sets %in% sets_toiterateover)]
+
+## remove parameters if there are no comids in the set - to deal with instances where there is no P or N target/baseload (empty sets)
+empty_set_lines <- AMPLmod[which(sapply(AMPLmod, grepl, pattern = "set.*\\{\\}"))]
+empty_sets <- unlist(
+  lapply(
+    str_extract_all(empty_set_lines, pattern = "(?<=set ).+?(?= \\{\\})"), 
+    function(x) gsub(pattern = " ", replacement = "", x)
+  )
+)
+pattern_matched_sets <- grep("[A-Za-z][0-9]", empty_sets, value = TRUE)
+letter_number_combinations <- unique(gsub(".*?([A-Za-z][0-9]).*", "\\1", pattern_matched_sets))
+## list the parameters
+## We will not do sensitivity analysis on acftoft3, pcp or agBMP_minarea, because these are not variable and there is little to no uncertainty in the numbers. We will not do uncertainty analysis on ps_coef, urban_coef, road_coef, ag_coef or ripbuf_coef, because these are created from other parameters, and we will already be doing uncertainty analysis on those other parameters.
+params <- AMPLmod[which(sapply(AMPLmod, grepl, pattern = "param"))] %>%
+  mutate(
+    param_name = str_split_fixed(X, pattern = " ", n = 3)[,2],
+    param_sets = str_extract_all(X, pattern = "(?<=\\{).+?(?=\\})")
+  ) %>%
+  filter(
+    !param_name %in% c(
+      "acfttoft3", 
+      "pcp", 
+      "agBMP_minarea;", 
+      "ps_coef", 
+      "urban_coef",
+      "road_coef",
+      "urban_comid_xwalk",
+      "road_comid_xwalk",
+      "ag_coef",
+      "graz_coef",
+      "ripbuf_coef",
+      "grazBMP_minarea;",
+      "urbanBMP_minarea;",
+      "roadBMP_minarea;"
+    )
+  ) %>%
+  rowwise() %>%
+  filter(!any(sapply(letter_number_combinations, grepl, param_name))) %>%
+  ungroup()
+
+## create a table of parameters and the sets to iterate over that we need to test for sensitivity
+params_totest <- foreach(i = 1:nrow(params), .combine = "rbind") %do% {
+  
+  param <- params$param_name[i]
+  
+  if(length(params$param_sets[i][[1]]) > 0) {
+    if(grepl(x = params$param_sets[i][[1]], pattern = "comid")) {
+      if(grepl(x = params$param_sets[i][[1]], pattern = ",")) {
+        
+        param_sets <- unlist(
+          lapply(
+            unlist(
+              lapply(
+                lapply(
+                  str_split(unlist(params$param_sets[i]), pattern = ","), 
+                  gsub, 
+                  pattern ="[a-z] in ", 
+                  replacement = ""
+                )[[1]], 
+                gsub, 
+                pattern = " ", 
+                replacement = ""
+              )
+            ), 
+            my_savematch, 
+            set = sets_toiterateover
+          )
+        )
+        
+        param_comidsets <- unlist(
+          lapply(
+            unlist(
+              lapply(
+                lapply(
+                  str_split(unlist(params$param_sets[i]), pattern = ","), 
+                  gsub, 
+                  pattern ="[a-z] in ", 
+                  replacement = ""
+                )[[1]], 
+                gsub, 
+                pattern = " ", 
+                replacement = ""
+              )
+            ), 
+            my_savematch, 
+            set = sets_nottoiterateover
+          )
+        )
+      } else {
+        param_sets <- NA_character_
+        
+        param_comidsets <- unlist(
+          lapply(
+            unlist(
+              lapply(
+                lapply(
+                  str_split(unlist(params$param_sets[i]), pattern = ","), 
+                  gsub, 
+                  pattern ="[a-z] in ", 
+                  replacement = ""
+                )[[1]], 
+                gsub, 
+                pattern = " ", 
+                replacement = ""
+              )
+            ), 
+            my_savematch, 
+            set = sets_nottoiterateover
+          )
+        )
+      }
+    } else {
+      param_sets <- unlist(
+        lapply(
+          unlist(
+            lapply(
+              lapply(
+                str_split(unlist(params$param_sets[i]), pattern = ","), 
+                gsub, 
+                pattern ="[a-z] in ", 
+                replacement = ""
+              )[[1]], 
+              gsub, 
+              pattern = " ", 
+              replacement = ""
+            )
+          ), 
+          my_savematch, 
+          set = sets_toiterateover
+        )
+      )
+      
+      param_comidsets <- NA_character_
+    }
+  } else {
+    param_sets <- NA_character_
+    param_comidsets <- NA_character_
+  }
+  
+  
+  if(length(param_sets) > 0 && !is.na(param_sets)) {
+    params_totest_tmp <- foreach(j = 1:length(param_sets), .combine = "rbind")  %do% {
+      
+      param_set <- param_sets[j]
+      
+      param_othersets <- if(length(param_sets) > 1) {
+        param_sets[-j]
+      } else {NA_character_}
+      
+      param_set_members_unformatted <- set_members_toiterateover[
+        which(sets_toiterateover == param_set)
+      ][[1]]
+      
+      param_set_members <- str_extract_all(
+        param_set_members_unformatted, pattern = "(?<=\\').+?(?=\\')"
+      )[[1]]
+      
+      if (length(param_set_members) == 0) {
+        param_set_members <- NA
+      }
+      
+      param_set_members_dat <- param_set_members[
+        which(param_set_members != ", ")
+      ]
+      
+      if (length(param_set_members_dat) == 0) {
+        param_set_members_dat <- NA
+      }
+      
+      data.frame(
+        param = param,
+        sets = param_set,
+        member = param_set_members_dat,
+        comidsets = param_comidsets,
+        othersets = param_othersets
+      )
+    }
+  } else if (length(param_comidsets) > 0 && !is.na(param_comidsets)){
+    
+    params_totest_tmp <- data.frame(
+      param = param,
+      sets = NA_character_,
+      member = NA_character_,
+      comidsets = param_comidsets,
+      othersets = NA_character_
+    )
+    
+  } else {
+    params_totest_tmp <- data.frame(
+      param = param,
+      sets = NA_character_,
+      member = NA_character_,
+      comidsets = NA_character_,
+      othersets = NA_character_
+    )
+  }
+  params_totest_tmp
+}
+params_totest_dat <- params_totest %>% filter(member != "," | is.na(member))
+```
+
+
+## Write AMPL reference script
+
+```{r write reference script}
+# -------------Develop command file-------------
+
+cat(
+  "#WMOST Optimization Screening Tool AMPL command file
+solve;
+option display_precision 10;
+display solve_result_num, solve_result;
+display cost.result;
+display cost;
+
+option display_1col 10000000000;
+option display_width 100000000000;
+option omit_zero_rows 1;
+option omit_zero_cols 1;
+display {p in point_bmp} sum {c in comid_all} (ps_coef[c,p] * point_dec[c,p]);
+display {u in urban_bmp} sum {x in urban_comid_all} (urban_coef[x,u] * urban_frac[x,u]);
+display {r in road_bmp} sum {h in road_comid_all} (road_coef[h,r] * road_frac[h,r]);
+display {a in ag_bmp} sum {c in comid_all} (ag_coef[c,a] * ag_frac[c,a]);
+display {g in graz_bmp} sum {c in comid_all} (graz_coef[c,g] * graz_frac[c,g]);
+display {b in ripbuf_bmp} sum {c in comid_all} (ripbuf_coef[c, b] * ripbuf_length[c, b]);
+",
+file = paste(Sens_scriptsfolder, "STcommand_reference.amp", sep=""),
+sep = "\n"
+)
+```
+
+```{r solve reference model}
+
+tmp <-my_NgetSolverTemplate(
+  category = "lp", solvername = "CPLEX", inputMethod = "AMPL"
+)
+## setting path to model and data files
+modf <- paste0(AMPLscriptsfolder, "STmodel.mod")
+datf <- paste0(AMPLscriptsfolder, "STdata.dat")
+comf <- paste0(Sens_scriptsfolder, "STcommand_reference.amp")
+
+## add comments
+comments <- paste(
+  "Reference File for Local sensivity analysis. All BMPs included and no user limits. Default loading targets."
+)
+
+## import file contents
+modc <- paste(paste(readLines(modf), collapse = "\n"), "\n")
+datc <- paste(paste(readLines(datf), collapse = "\n"), "\n")
+comc <- paste(paste(readLines(comf), collapse = "\n"), "\n")
+
+
+## create list object
+argslist <- list(
+  model = modc, data = datc, commands = comc, comments = comments, email = email
+)
+## create XML string
+xmls <- CreateXmlString(neosxml = tmp, cdatalist = argslist)
+
+## Submit job
+job.xml.text <- NsubmitJob(
+  xmlstring = xmls, user = "rneos", interface = "", id = 0
+)
+
+## Retrieve results
+resultfile <- NgetFinalResults(obj = job.xml.text, convert = TRUE)
+write.table(
+  resultfile@ans, file = paste0(NEOSresults, "NEOSresult_reference.txt")
+)
+```
+
+## Write AMPL sensitivity AMPL command scripts
+
+Note: Ensure the AMPLscripts folder is empty before running to ensure that only the relevant scripts are sent to the NEOS server later on.
+```{r}
+foreach(i = 1:nrow(params_totest_dat), .verbose = FALSE) %do% {
+  
+  param <- params_totest_dat[i, ]$param
+  sets <- params_totest_dat[i, ]$sets
+  member <- params_totest_dat[i, ]$member
+  comidset <- params_totest_dat[i, ]$comidsets
+  othersets <- params_totest_dat[i, ]$othersets
+  
+  ordersets <- params$param_sets[which(params$param_name == param)][[1]]
+  sets_pos <- str_locate(string = ordersets, pattern = sets)[1]
+  comid_pos <- str_locate(string = ordersets, pattern = comidset)[1]
+  othersets_pos <- str_locate(string = ordersets, pattern = othersets)[1]
+  
+  if(is.na(sets) & is.na(comidset) & is.na(othersets)) {
+    sens_par <- param
+  } else if(!is.na(sets) & is.na(comidset) & is.na(othersets)) {
+    sens_par <- paste0(param, "['", member, "']")
+  } else if(is.na(sets) & !is.na(comidset) & is.na(othersets)) {
+    sens_par <- paste0(param, "[c]")
+  } else if(!is.na(sets) & !is.na(comidset) & is.na(othersets)) {
+    if(sets_pos < comid_pos) {
+      sens_par <- paste0(param, "['", member, "', c]")
+    } else if(sets_pos > comid_pos) {
+      sens_par <- paste0(param, "[c, '", member, "']")
+    }
+  } else if(!is.na(sets) & is.na(comidset) & !is.na(othersets)) {
+    if(sets_pos < othersets_pos) {
+      sens_par <- paste0(param, "['", member, "', x]")
+    } else if(sets_pos > othersets_pos) {
+      sens_par <- paste0(param, "[x, '", member, "']")
+    }
+  } else if(!is.na(sets) & !is.na(comidset) & !is.na(othersets)) {
+    if(sets_pos < comid_pos & sets_pos < othersets_pos & comid_pos < othersets_pos) {
+      sens_par <- paste0(param, "['", member, "', c, x]")
+    } else if(sets_pos < comid_pos & sets_pos < othersets_pos & comid_pos > othersets_pos) {
+      sens_par <- paste0(param, "['", member, "', x, c]")
+    } else if(sets_pos > comid_pos & sets_pos < othersets_pos & comid_pos < othersets_pos) {
+      sens_par <- paste0(param, "[c, '", member, "', x]")
+    } else if(sets_pos > comid_pos & sets_pos > othersets_pos & comid_pos < othersets_pos) {
+      sens_par <- paste0(param, "[c, x, '", member, "']")
+    } else if(sets_pos < comid_pos & sets_pos > othersets_pos & comid_pos > othersets_pos) {
+      sens_par <- paste0(param, "[x, '", member, "', c]")
+    } else if(sets_pos > comid_pos & sets_pos > othersets_pos & comid_pos > othersets_pos) {
+      sens_par <- paste0(param, "[x, c, '", member, "']")
+    }
+  }
+  
+  
+  filename <- paste0("STcommand_sens-", substr(param, 1, 20), "-", substr(member, 1, 25), ".amp")
+  
+  nchar(filename)
+  
+  cat(
+    "
+  #WMOST Optimization Screening Tool AMPL sensitivity analysis command file
+set Sens;
+let Sens := {0.01, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.96, 0.97, 0.98, 0.99, 0.995, 0.996, 0.997, 0.998, 0.999, 1, 1.001, 1.002, 1.003, 1.004, 1.005, 1.01, 1.02, 1.03, 1.04, 1.05, 1.1, 1.2, 1.3, 1.4, 1.5, 2, 3, 4, 5, 10, 20, 30, 40, 50, 100};
+",
+if(is.na(comidset) & is.na(othersets)) {
+  paste0("param SENSVALS {Sens};")
+} else if(!is.na(comidset) & is.na(othersets)) {
+  paste0("param SENSVALS {Sens, ", comidset, "};")
+} else if(is.na(comidset) & !is.na(othersets)) {
+  paste0("param SENSVALS {Sens, ", othersets, "};")
+} else if(!is.na(comidset) & !is.na(othersets)) {
+  paste0("param SENSVALS {Sens, ", comidset, ", ", othersets, "};")
+}, 
+
+"
+param frac;
+for {s in Sens} {
+let frac := s;
+",
+if(is.na(comidset) & is.na(othersets)) {
+  paste0("let SENSVALS[s] := frac * ", sens_par, ";")
+} else if(!is.na(comidset) & is.na(othersets)) {
+  paste0("for {c in ", comidset, "} { \n let SENSVALS[s, c] := frac * ", sens_par, "; \n };")
+} else if(is.na(comidset) & !is.na(othersets)) {
+  paste0("for {x in ", othersets, "} { \n let SENSVALS[s, x] := frac * ", sens_par, "; \n };")
+} else if(!is.na(comidset) & !is.na(othersets)) {
+  paste0("for {x in ", othersets, "} { for {c in ", comidset, "} {\n let SENSVALS[s, c, x] := frac * ", sens_par, "; \n }; \n };")
+}, 
+"}
+display SENSVALS;
+for {s in Sens} {
+let frac := s;
+",
+if(is.na(comidset) & is.na(othersets)) {
+  paste0("let ", sens_par, " := SENSVALS[s];")
+} else if(!is.na(comidset) & is.na(othersets)) {
+  paste0("for {c in ", comidset, "} { \n let ", sens_par, " := SENSVALS[s, c]; \n }")
+} else if(is.na(comidset) & !is.na(othersets)) {
+  paste0("for {x in ", othersets, "} { \n let ", sens_par, " := SENSVALS[s, x]; \n }")
+} else if(!is.na(comidset) & !is.na(othersets)) {
+  paste0("for {c in ", comidset, ", x in ", othersets, "} { \n let ", sens_par, " := s * SENSVALS[s, c, x]; \n }")
+},
+"
+solve;
+option display_precision 10;
+display frac;
+display solve_result;
+display cost;
+",
+if(is.na(comidset) & is.na(othersets)) {
+  paste0("display ", sens_par, ";")
+} else if(!is.na(comidset) & is.na(othersets)) {
+  paste0("display {c in ", comidset, "} ", sens_par, ";")
+} else if(is.na(comidset) & !is.na(othersets)) {
+  paste0("display {x in ", othersets, "} ", sens_par, ";")
+} else if(!is.na(comidset) & !is.na(othersets)) {
+  paste0("display {c in ", comidset, ", x in ", othersets, "} ", sens_par, ";")
+},
+"
+option display_1col 10000000000;
+option display_width 100000000000;
+option omit_zero_rows 1;
+option omit_zero_cols 1;
+display {p in point_bmp} sum {c in comid_all} (ps_coef[c,p] * point_dec[c,p]);
+display {u in urban_bmp} sum {x in urban_comid_all} (urban_coef[x,u] * urban_frac[x,u]);
+display {r in road_bmp} sum {h in road_comid_all} (road_coef[h,r] * road_frac[h,r]);
+display {a in ag_bmp} sum {c in comid_all} (ag_coef[c,a] * ag_frac[c,a]);
+display {g in graz_bmp} sum {c in comid_all} (graz_coef[c,g] * graz_frac[c,g]);
+display {b in ripbuf_bmp} sum {c in comid_all} (ripbuf_coef[c, b] * ripbuf_length[c, b]);
+}
+",
+file = paste0(Sens_scriptsfolder, filename),
+sep = "\n"
+  )
+  
+}
+```
+
+## Send AMPL jobs to NEOS
+
+Note: When running for the first time, make sure there are no old NEOS results from previous local sensitivity analyses in the NEOSResults folder. Then, comment out the 'redonumbers <-' line, and choose 'i = 1:length(cmdfiles)' to iterate over the foreach loop. This produces the first round of NEOS results. Once this has run, you can run the next 3 code chunks (through 'load & parse sens files'). After running the 'load & parse sens files', come back to this chunk and uncomment the 'redonumbers <-' line. If 'redonumbers' is empty, return to the 'parse sensitivity results' chunk. The 'redonumbers' object will include any jobs that did not complete successfully. This can happen for various reasons, including if the connection to the NEOS server was dropped for whatever reason. Change the foreach loop to iterate over redonumbers, and run this code chunk and the next three again. Repeat until redonumbers is an empty integer (all jobs have been successful). 
+```{r send AMPL scripts to solver}
+cmdfiles <- list.files(
+  path = Sens_scriptsfolder, pattern = "STcommand_sens", full.names = TRUE
+) 
+
+tmp <-my_NgetSolverTemplate(
+  category = "lp", solvername = "CPLEX", inputMethod = "AMPL"
+)
+## setting path to model and data files
+modf <- paste0(AMPLscriptsfolder,  "STmodel.mod")
+datf <- paste0(AMPLscriptsfolder, "STdata.dat")
+
+## enter email & comments
+email <- "kelly-anne.moffa@icf.com"
+## import file contents
+modc <- paste(paste(readLines(modf), collapse = "\n"), "\n")
+datc <- paste(paste(readLines(datf), collapse = "\n"), "\n")
+
+### Redo values (must run load & parse first)
+#redonumbers <- which(is.na(check.completeness$resultfile))
+
+foreach(i = 1:length(cmdfiles), .packages = c("tidyverse", "rneos")) %do%  { #i = 1:length(cmdfiles) or i = redonumbers
+
+  options(RCurlOptions = list(ssl.verifypeer = FALSE))
+  
+  comf <- cmdfiles[i]
+  
+  paramname <- str_extract(
+    cmdfiles[i], pattern = "(?<=\\STcommand_sens-).+?(?=\\.amp)"
+  )
+  
+  comments <- paste(
+    "sensitivity test of", 
+    paramname, 
+    " with all BMPs included and no user limits. Default loading targets."
+  )
+  
+  ## import file contents
+  
+  comc <- paste(paste(readLines(comf), collapse = "\n"), "\n")
+  
+  ## create list object
+  argslist <- list(
+    model = modc, data = datc, commands = comc, comments = comments, email = email
+  )
+  ## create XML string
+  xmls <- CreateXmlString(neosxml = tmp, cdatalist = argslist)
+  
+  ## Submit job
+  job.xml.text <- NsubmitJob(
+    xmlstring = xmls, user = "rneos", interface = "", id = 0
+  )
+  
+  ## Retrieve results
+  resultfile <- NgetFinalResults(obj = job.xml.text, convert = TRUE)
+  write.table(
+    resultfile@ans, file = paste0(NEOSresults,"NEOSresult_", paramname, ".txt")
+  )
+    
+}
+```
+
+## Load Reference Data and AMPL model
+```{r load reference file}
+dat <- fread(paste0(NEOSresults, "NEOSresult_reference.txt"), sep = "") %>% 
+  rename(X = 1)
+
+dat <- as.data.frame(dat)
+
+#Load User Specs BMP file to assit in parsing BMP types
+user_specs_BMPs <- fread(
+  paste(InPath, "01_UserSpecs_BMPs.csv", sep = ""), data.table = FALSE
+)
+ag_bmps <- user_specs_BMPs %>% filter(BMP_Category == "ag") %>% select(BMP)
+urban_bmps <- user_specs_BMPs %>% filter(BMP_Category == "urban") %>% select(BMP)
+point_bmps <- user_specs_BMPs %>% filter(BMP_Category == "point") %>% select(BMP)
+ripbuf_bmps <- user_specs_BMPs %>% filter(BMP_Category == "ripbuf") %>% select(BMP)
+graz_bmps <- user_specs_BMPs %>% filter(BMP_Category == "graz") %>% select(BMP)
+road_bmps <- user_specs_BMPs %>% filter(BMP_Category == "road") %>% select(BMP)
+
+```
+
+## Parse Reference File
+Creates data frames for the reference result ag, urban, and riparian buffer bmps.
+```{r parse reference file}
+
+full.list.of.BMPs <- c(
+  unique(
+    (
+      params_totest_dat %>% 
+        filter(sets %in% c("urban_bmp", "ripbuf_bmp", "ag_bmp", "graz_bmp", "road_bmp"))
+    )$member
+  ), 
+  "WWTP_upgrades"
+)
+ref.cost <- as.numeric(
+  gsub("cost = ", "", dat[which(sapply(dat, grepl, pattern = "cost =")), 1])
+)
+end.rows <- which(sapply(dat, grepl, pattern = ";"))
+BMPdescriptions_begin <- which(sapply(dat, grepl, pattern = "sum[{].*in.*comid_all[}]")) 
+which_point <- grep("point", dat[BMPdescriptions_begin,])
+which_ag <- grep("ag", dat[BMPdescriptions_begin,])
+which_urban <- grep("urban", dat[BMPdescriptions_begin,])
+which_graz <- grep("graz", dat[BMPdescriptions_begin,])
+which_road <- grep("road", dat[BMPdescriptions_begin,])
+which_ripbuf <- grep("ripbuf", dat[BMPdescriptions_begin,])
+BMP <- c()
+BMP[which_point] <- "point"
+BMP[which_ag] <- "ag"
+BMP[which_urban] <- "urban"
+BMP[which_road] <- "road"
+BMP[which_graz] <- "graz"
+BMP[which_ripbuf] <- "ripbuf"
+
+BMP.end.rows <- which(sapply(dat$X, grepl, pattern = ";"))
+
+frac.summary <- data.frame(
+  frac = 1,
+  solve_result = 1,
+  cost = ref.cost
+) %>%
+  mutate(
+    cost = case_when(solve_result == 0 ~ NA_real_, solve_result == 1 ~ cost)
+  )
+
+BMPdescriptions_end <- foreach(
+  i = 1:length(BMPdescriptions_begin), .combine = "c"
+) %do% {
+  if(i %in% which_point) {tmp <- BMPdescriptions_begin[i]} else {
+    tmp <- BMP.end.rows[min(which(BMP.end.rows > BMPdescriptions_begin[i]))]
+  }
+  tmp
+}
+
+BMPspending_summary <- foreach(i = 1:length(BMPdescriptions_begin), .combine = "rbind") %do% {
+  tmp <- dat[BMPdescriptions_begin[i]:BMPdescriptions_end[i],1]
+  if(i %in% which_point) {
+    bee <- as.numeric(str_split_fixed(tmp, " = ", n = 2)[2])
+    tmp.dat <- data_frame(frac = ceiling(i / 4), BMP = "WWTP_upgrades", Total_Spent = bee)
+  } else if(length(tmp) > 2) {
+    tmp.clean <- str_split_fixed(parse_character(tmp[2:(length(tmp)-1)]), " ", n = 2)
+    BMP <- parse_character(tmp.clean[,1])
+    costs <- parse_number(tmp.clean[,2])
+    
+    tmp.dat <- data_frame(frac = ceiling(i / 4), BMP = BMP, Total_Spent = costs)
+  } else {tmp.dat <- NULL}
+  tmp.dat
+}
+
+BMPspending_summary_reference <- BMPspending_summary %>%
+  full_join(., BMPspending_summary %>% expand(frac, BMP = full.list.of.BMPs)) %>%
+  mutate(
+    Total_Spent = case_when(
+      is.na(Total_Spent) ~ 0, !is.na(Total_Spent) ~ Total_Spent
+    ),
+    BMP_Category = case_when(
+      BMP %in% point_bmps$BMP ~ "Point Source BMPs",
+      BMP %in% ripbuf_bmps$BMP ~ "Riparian Buffer BMPs",
+      BMP %in% urban_bmps$BMP ~ "Urban BMPs",
+      BMP %in% ag_bmps$BMP ~ "Agricultural BMPs",
+      BMP %in% graz_bmps$BMP ~ "Grazing BMPs",
+      BMP %in% road_bmps$BMP ~ "Road BMPs"
+    )
+  ) %>%
+  left_join(., frac.summary, by = "frac") %>%
+  filter(solve_result == 1)
+
+``` 
+
+## Load & Parse NEOS results
+
+Note: This code chunk can be run repeatedly with 'send AMPL scripts to server'. For instructions, see note following the "Send AMPL jobs to NEOS" header.
+Note: Once all jobs have been successfully run, uncomment and run all the code in this chunk. This is necessary the first time you parse NEOS results from a local sensitivity analysis. The code may take half and hour to an hour to run. Once it is completed, it will save the results, and everything from the line that begins "all.results <- " through the line that begins "save(all.results" can be commented out again. The last line of this code chunk will load the saved file, and can be used for future analysis to spead things up.
+```{r load & parse sens files}
+list.results <- list.files(
+  path = NEOSresults, pattern = "NEOSresult_*", full.names = TRUE
+)
+
+list.results <- list.results[grep("_reference", list.results, invert = TRUE)]
+
+##### Check Completiong #####
+check.completeness <- data.frame(cmdfile = cmdfiles) %>% 
+  mutate(
+    paramset = gsub(
+      ".amp", 
+      "", 
+      gsub(
+        "./RBEROST-Pacific/SensitivityAnalysis/AMPLscripts/STcommand_sens-", 
+        "", 
+        cmdfile
+      )
+    )
+  ) %>%
+  left_join(
+    .,
+    data.frame(resultfile = list.results) %>% 
+      mutate(
+        paramset = gsub(
+          ".txt", 
+          "", 
+          gsub(
+            "./RBEROST-Pacific/SensitivityAnalysis/NEOSResults/NEOSresult_", 
+            "", 
+            resultfile
+          )
+        )
+      ),
+    by = "paramset"
+  )
+
+all.results <- foreach(i = 1:length(list.results), .combine = "rbind") %do% {
+  param <- gsub(
+    x = gsub(
+      x = list.results[i],
+      pattern =
+        "./RBEROST-Pacific/SensitivityAnalysis/NEOSResults/NEOSresult_",
+      replacement = ""
+    ),
+    pattern = ".txt",
+    replacement = ""
+  )
+
+  dat <- fread(list.results[i], fill = TRUE, skip = 2, sep = "\t", sep2 = "\n") %>%
+    rename(X = 1)
+
+  if(ncol(dat) > 1) {
+    dat$X <- apply(X = dat[,1:ncol(dat)], MARGIN = 1, FUN =  paste, collapse = " ")
+    dat <- dat %>% select(X)
+  }
+
+  dat.split <- dat %>%
+    mutate(
+      new.group = case_when(
+        (
+          grepl(x = X, pattern = "frac = ") &
+            !grepl(x = X, pattern = "_frac") &
+            !grepl(x = X, pattern = "frac_")
+        ) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      group = cumsum(new.group)
+    ) %>%
+    filter(group > 0) %>%
+    group_split(group)
+
+  dat.split.parsed <- foreach(j = 1:length(dat.split), .combine = "rbind") %do% {
+
+    dat.tmp <- as.data.frame(dat.split[[j]])
+
+    frac <- as.numeric(
+      str_extract(
+        string = dat.tmp[
+          which(
+            sapply(dat.tmp, grepl, pattern = "frac =") &
+              !sapply(dat.tmp, grepl, pattern = "agcost_frac =")
+          ),
+          1
+        ],
+        pattern = "(?i)(?<=frac =\\D)[[:digit:]]+\\.*[[:digit:]]*"
+      )
+    )
+
+    solve.result = gsub(
+      " ",
+      "",
+      gsub(
+        "solve_result = ",
+        "",
+        dat.tmp[which(sapply(dat.tmp, grepl, pattern = "solve_result =")), 1]
+      )
+    )
+
+    ref.cost <- as.numeric(
+      gsub(
+        "cost = ",
+        "",
+        dat.tmp[which(sapply(dat.tmp, grepl, pattern = "cost =")), 1]
+      )
+    )
+
+    end.rows <- which(sapply(dat.tmp, grepl, pattern = ";"))
+
+
+    BMPdescriptions_begin <- which(
+      sapply(dat.tmp, grepl, pattern = "sum[{]c in comid_all[}]")
+    )
+    which_point <- grep("point", dat.tmp[BMPdescriptions_begin,1])
+    which_ag <- grep("ag", dat.tmp[BMPdescriptions_begin,1])
+    which_urban <- grep("urban", dat.tmp[BMPdescriptions_begin,1])
+    which_ripbuf <- grep("ripbuf", dat.tmp[BMPdescriptions_begin,1])
+    which_graz <- grep("graz", dat.tmp[BMPdescriptions_begin,1])
+    which_road <- grep("road", dat.tmp[BMPdescriptions_begin,1])
+    BMP <- c()
+    BMP[which_point] <- "point"
+    BMP[which_ag] <- "ag"
+    BMP[which_urban] <- "urban"
+    BMP[which_ripbuf] <- "ripbuf"
+    BMP[which_graz] <- "graz"
+    BMP[which_road] <- "road"
+
+    BMP.end.rows <- which(sapply(dat.tmp$X, grepl, pattern = ";"))
+
+    frac.summary <- data.frame(
+      frac = frac,
+      solve_result = solve.result,
+      cost = ref.cost
+    ) %>%
+      mutate(
+        cost = case_when(
+          solve_result == "infeasible" ~ NA_real_,
+          solve_result == "solved" ~ cost
+        )
+      )
+
+    BMPdescriptions_end <- foreach(
+      k = 1:length(BMPdescriptions_begin), .combine = "c"
+    ) %do% {
+      if(k %in% which_point) {tmp <- BMPdescriptions_begin[k]} else {
+        tmp <- BMP.end.rows[min(which(BMP.end.rows > BMPdescriptions_begin[k]))]
+      }
+      tmp
+    }
+
+    BMPspending_summary <- foreach(
+      k = 1:length(BMPdescriptions_begin), .combine = "rbind"
+    ) %do% {
+
+      tmp <- dat.tmp[BMPdescriptions_begin[k]:BMPdescriptions_end[k],1]
+
+      if(k %in% which_point) {
+        bee <- as.numeric(str_split_fixed(tmp, " = ", n = 2)[2])
+        tmp.dat <- data_frame(
+          frac = frac, BMP = "WWTP_upgrades", Total_Spent = bee
+        )
+      } else if(length(tmp) > 2) {
+        tmp.clean <- str_split_fixed(
+          parse_character(tmp[2:(length(tmp)-1)]), " ", n = 2
+        )
+        BMP <- parse_character(tmp.clean[,1])
+        costs <- parse_number(tmp.clean[,2])
+
+        tmp.dat <- data_frame(frac = frac, BMP = BMP, Total_Spent = costs)
+      } else {tmp.dat <- NULL}
+      tmp.dat
+    }
+
+    BMPspending_summary_full <- BMPspending_summary %>%
+      full_join(
+        ., BMPspending_summary %>% expand(frac, BMP = full.list.of.BMPs), by = c("frac", "BMP")
+      ) %>%
+      mutate(
+        Total_Spent = case_when(
+          is.na(Total_Spent) ~ 0, !is.na(Total_Spent) ~ Total_Spent
+        ),
+        BMP_Category = case_when(
+          BMP %in% point_bmps$BMP ~ "Point Source BMPs",
+          BMP %in% ripbuf_bmps$BMP ~ "Riparian Buffer BMPs",
+          BMP %in% urban_bmps$BMP ~ "Urban BMPs",
+          BMP %in% ag_bmps$BMP ~ "Agricultural BMPs",
+          BMP %in% graz_bmps$BMP ~ "Grazing BMPs",
+          BMP %in% road_bmps$BMP ~ "Road BMPs"
+        ),
+        param = param
+      ) %>%
+      left_join(., frac.summary, by = "frac") %>%
+      filter(solve_result == "solved") %>%
+      mutate(
+        setmember = unlist(lapply(str_split(param, pattern = "-"), "[[", 2)),
+        param = unlist(lapply(str_split(param, pattern = "-"), "[[", 1))
+      )
+
+    # print(frac)
+    BMPspending_summary_full
+
+  }
+
+  print(c(param))
+
+  dat.split.parsed
+
+}
+
+save(all.results, file = paste0(NEOSresults, "all_results.RDa"))
+
+all.results <- get(load(paste0(NEOSresults, "all_results.RDa")))
+```
+
+## Parse NEOS sensitivity results
+```{r}
+all.results.compare <- all.results %>%
+  left_join(
+    ., 
+    BMPspending_summary_reference %>% 
+      select(BMP, Total_Spent, BMP_Category, cost),
+    by = c("BMP", "BMP_Category"), suffix = c("_sens", "_ref")
+  ) 
+
+all.costs <- all.results.compare %>%
+  group_by(param, setmember, frac) %>%
+  summarize(cost_sens = mean(cost_sens), cost_ref = mean(cost_ref))  %>%
+  mutate(
+    param = case_when(
+      param == "ripbuf_costs_operati" ~ "ripbuf_costs_operations",
+      param == "graz_costs_operation" ~ "graz_costs_operations",
+      param == "point_costs_operatio" ~ "point_costs_operations",
+      param == "road_costs_operation" ~ "road_costs_operations",
+      param == "unbuffered_banklengt" ~ "unbuffered_banklength",
+      param == "urban_bmp_implementa" ~ "urban_bmp_implementationpotential",
+      param == "ag_bmp_implementatio" ~ "ag_bmp_implementationpotential",
+      param == "urban_costs_operatio" ~ "urban_costs_operations",
+      TRUE ~ param
+    ),
+    # setmember = case_when( # update if any setmember names are cut off
+    #   setmember == "Biofiltration_w_Underdrai" ~ "Biofiltration_w_Underdrain",
+    #   setmember == "Enhanced_Biofiltration_w_" ~ "Enhanced_Biofiltration_w_ISR",
+    #   setmember == "Extended_Dry_Detention_Ba" ~ "Extended_Dry_Detention_Basin",
+    #   setmember == "Porous_Pavement_w_subsurf" ~ 
+    #     "Porous_Pavement_w_subsurface_infiltration",
+    #   setmember == "Porous_Pavement_w_underdr" ~ "Porous_Pavement_w_underdrain",
+    #   TRUE ~ setmember
+    # ),
+    param_source = case_when(
+      str_detect(param, paste(c(
+        "ag_frac", 
+        "graz_frac", 
+        "loads_lim_N", 
+        "loads_lim_P", 
+        "ripbuf_frac",
+        "urban_frac",
+        "road_frac"
+      ), collapse = "|")) ~ 
+      "User Supplied", 
+      TRUE ~ "Provided Data"
+    )
+  )
+
+tolerance.ranges_cost <- all.costs %>%
+  mutate(
+    percent_difference = (cost_ref - cost_sens) / cost_ref
+  ) %>%
+  filter(abs(percent_difference) <= 0.1) %>%
+  group_by(param, setmember) %>%
+  summarize(tolerance_low = min(frac), tolerance_high = max(frac)) 
+
+all.spatial <- all.results.compare %>%
+  mutate(
+    percent_difference = case_when(
+      Total_Spent_ref != 0 ~ 
+        (Total_Spent_ref - Total_Spent_sens) / Total_Spent_ref, 
+      Total_Spent_ref == 0 ~ 
+        case_when(Total_Spent_sens == 0  ~ 0, Total_Spent_sens != 0 ~ Inf)
+    )
+  ) %>%
+  mutate(
+    param = case_when(
+      param == "ripbuf_costs_operati" ~ "ripbuf_costs_operations",
+      param == "graz_costs_operation" ~ "graz_costs_operations",
+      param == "point_costs_operatio" ~ "point_costs_operations",
+      param == "road_costs_operation" ~ "road_costs_operations",
+      param == "unbuffered_banklengt" ~ "unbuffered_banklength",
+      param == "urban_bmp_implementa" ~ "urban_bmp_implementationpotential",
+      param == "ag_bmp_implementatio" ~ "ag_bmp_implementationpotential",
+      param == "urban_costs_operatio" ~ "urban_costs_operations",
+      TRUE ~ param
+    ),
+    # setmember = case_when( # update if any setmember names are cut off
+    #   setmember == "Biofiltration_w_Underdrai" ~ "Biofiltration_w_Underdrain",
+    #   setmember == "Enhanced_Biofiltration_w_" ~ "Enhanced_Biofiltration_w_ISR",
+    #   setmember == "Extended_Dry_Detention_Ba" ~ "Extended_Dry_Detention_Basin",
+    #   setmember == "Porous_Pavement_w_subsurf" ~ 
+    #     "Porous_Pavement_w_subsurface_infiltration",
+    #   setmember == "Porous_Pavement_w_underdr" ~ "Porous_Pavement_w_underdrain",
+    #   TRUE ~ setmember
+    # ),
+    param_source = case_when(
+      str_detect(param, paste(c(
+        "ag_frac", 
+        "graz_frac", 
+        "loads_lim_N", 
+        "loads_lim_P", 
+        "ripbuf_frac",
+        "urban_frac",
+        "road_frac"
+      ), collapse = "|")) ~ 
+      "User Supplied", 
+      TRUE ~ "Provided Data"
+    )
+  )
+
+
+tolerance.ranges_spatial <- all.spatial %>%
+  filter(abs(percent_difference) <= 0.1 ) %>%
+  group_by(param, setmember, BMP) %>%
+  summarize(
+    tolerance_low_byBMP = min(frac), tolerance_high_byBMP = max(frac)
+  ) %>%
+  ungroup() %>%
+  group_by(param, setmember) %>%
+  summarize(
+    tolerance_low = max(tolerance_low_byBMP), 
+    tolerance_high = min(tolerance_high_byBMP)
+  )
+
+tolerance.ranges <- full_join(
+  tolerance.ranges_cost, 
+  tolerance.ranges_spatial, 
+  by = c("param", "setmember"), 
+  suffix = c(".cost", ".spatial")
+) %>%
+  rowwise() %>%
+  mutate(
+    tolerance_low = max(tolerance_low.cost, tolerance_low.spatial),
+    tolerance_high = min(tolerance_high.cost, tolerance_high.spatial),
+    param_source = case_when(
+      str_detect(param, paste(c(
+        "ag_frac", 
+        "graz_frac", 
+        "loads_lim_N", 
+        "loads_lim_P", 
+        "ripbuf_frac",
+        "urban_frac",
+        "road_frac"
+      ), collapse = "|")) ~ 
+      "User Supplied", 
+      TRUE ~ "Provided Data"
+    ),
+    lowendtolerance = case_when(
+       str_detect(param, paste(c(
+        "ag_frac_min", 
+        "graz_frac_min", 
+        "ripbuf_frac_min",
+        "urban_frac_min",
+        "road_frac_min",
+        "point_effic_P", 
+        "ripbuf_costs_operati"
+      ), collapse = "|")) ~ 
+      "not applicable",
+      tolerance_low >= 0.99 ~ "highly sensitive",
+      tolerance_low >= 0.9 ~ "sensitive",
+      tolerance_low < 0.9 ~ "not sensitive"
+    ),
+    highendtolerance = case_when(
+      str_detect(param, paste(c(
+        "ag_frac", 
+        "graz_frac", 
+        "ripbuf_frac",
+        "urban_frac",
+        "road_frac",
+        "point_effic_P", 
+        "ripbuf_costs_operati"
+      ), collapse = "|")) ~ 
+      "not applicable",
+      tolerance_high <= 1.01 ~ "highly sensitive",
+      tolerance_high <= 1.1 ~ "sensitive",
+      tolerance_high > 1.1 ~ "not sensitive"
+    )
+  ) %>%
+  mutate(
+    param = case_when(
+      param == "ripbuf_costs_operati" ~ "ripbuf_costs_operations",
+      param == "graz_costs_operation" ~ "graz_costs_operations",
+      param == "point_costs_operatio" ~ "point_costs_operations",
+      param == "road_costs_operation" ~ "road_costs_operations",
+      param == "unbuffered_banklengt" ~ "unbuffered_banklength",
+      param == "urban_bmp_implementa" ~ "urban_bmp_implementationpotential",
+      param == "ag_bmp_implementatio" ~ "ag_bmp_implementationpotential",
+      param == "urban_costs_operatio" ~ "urban_costs_operations",
+      TRUE ~ param
+    # ),
+    # setmember = case_when( # update if any setmember names are cut off
+    #   setmember == "Biofiltration_w_Underdrai" ~ "Biofiltration_w_Underdrain",
+    #   setmember == "Enhanced_Biofiltration_w_" ~ "Enhanced_Biofiltration_w_ISR",
+    #   setmember == "Extended_Dry_Detention_Ba" ~ "Extended_Dry_Detention_Basin",
+    #   setmember == "Porous_Pavement_w_subsurf" ~ 
+    #     "Porous_Pavement_w_subsurface_infiltration",
+    #   setmember == "Porous_Pavement_w_underdr" ~ "Porous_Pavement_w_underdrain",
+    #   TRUE ~ setmember
+    )
+  )
+
+```
+## Summarize Tolerance Ranges, select params with ranges <10%
+```{r}
+tolerance.ranges %>% 
+  mutate(range = log10(tolerance_high) - log10(tolerance_low)) %>%
+  arrange(range)
+param_tenperc_range <- tolerance.ranges %>% 
+  mutate(range = log10(tolerance_high) - log10(tolerance_low)) %>%
+  filter(range <= 0.1) %>% select(param, range)
+tolerance.ranges %>% 
+  mutate(range = log10(tolerance_high) - log10(tolerance_low)) %>%
+  group_by(param) %>%
+  summarize(median_range = median(range)) %>%
+  arrange(median_range)
+tolerance.ranges %>% 
+  mutate(range = log10(tolerance_high) - log10(tolerance_low)) %>%
+  group_by(setmember) %>%
+  summarize(median_range = median(range)) %>%
+  arrange(median_range)
+
+tolerance.ranges %>%
+  group_by(param) %>%
+  mutate(mean_low = mean(tolerance_low), mean_high = mean(tolerance_high)) %>%
+  filter(mean_low > 0.9, mean_high <1.1)
+
+tolerance.ranges %>%
+  group_by(param) %>%
+  summarize(mean_low = mean(tolerance_low), mean_high = mean(tolerance_high)) %>%
+  filter(mean_low > 0.9, mean_high <1.1)
+
+tolerance.ranges %>%
+  group_by(param) %>%
+  summarize(mean_low = mean(tolerance_low), mean_high = mean(tolerance_high)) %>%
+  filter(mean_low > 0.99, mean_high <1.01)
+
+tolerance.ranges %>%
+  filter(tolerance_low >= 0.99, tolerance_high <= 1.01)
+```
+
+
+## Plot tolerance ranges by parameter value
+```{r sensfigs}
+setmember_shapes <- c(1:25, 1:25, 1, 2)
+
+# Get tolerance range based on cost
+lowendtolrange <- mean(all.costs$cost_ref) * 0.9
+highendtolrange <- mean(all.costs$cost_ref) * 1.1
+
+## View Sensitivity of Cost to all Parameters
+cost.sens <- ggplot(
+  # data = all.costs, 
+  data = all.costs %>% 
+    filter(
+      # param_source == "Provided Data",
+      param %in% param_tenperc_range$param # This selection of parameters are those with tolerance ranges <10%
+    ) %>%
+    ungroup() %>%
+    group_by(param, frac) %>%
+    summarize(cost_sens = mean(cost_sens)) %>%
+    mutate(
+      param = case_when(
+        param %in% c(
+          "unbuffered_banklength", "ripbuf_costs_capital", "ripbuf_frac_max"
+        ) ~
+          "ripbuf_costs_capital, ripbuf_frac_max, and unbuffered_banklength",
+        TRUE ~ param
+      )
+    ),
+  mapping = aes(
+    x = frac, y = cost_sens, color = param
+  )
+) + 
+  geom_rect(
+    inherit.aes = FALSE,
+    mapping = aes(
+      xmin = 0.01, xmax = 100, ymin = lowendtolrange, ymax = highendtolrange
+    ),
+    fill = "grey95"
+  ) +
+  geom_line(show.legend = TRUE, lwd = 1) +
+  # geom_point(size = 3, show.legend = FALSE) +
+  # geom_smooth(se = FALSE, method = "loess", lwd = 2, formula = "y~x") +
+  scale_x_log10(
+    name = "Fraction of Original", 
+    breaks = c(0.01, 0.1, 1, 10, 100), 
+    labels = c("0.01", "0.1", "1", "10", "100")
+  ) +
+  scale_color_brewer(palette = "Set1") +
+  # facet_wrap(facets = c("param", "setmember"), ncol = 4) + #scales = "free_y"
+  # facet_wrap(facets = c("param"), ncol = 4) + #scales = "free_y"
+  scale_y_log10(
+    name = "Total Annualized Cost (x $1,000,000)",
+    breaks = c(100000, 1000000, 10000000, 100000000, 1000000000), 
+    labels = c("$0.1", "$1", "$10", "$100", "$1,000")
+  ) +
+  theme(legend.position = "bottom", legend.direction = "vertical") 
+
+print(cost.sens)
+
+# 
+# 
+## View Sensitivity of Spatial to all Parameters -- seems to look odd for PS
+space.sens <- ggplot(
+  data = all.spatial %>%
+    filter(
+      # param_source == "Provided Data",
+       param %in% param_tenperc_range$param # This selection of parameters are those with tolerance ranges <10%
+    ) %>%
+    ungroup() %>%
+    group_by(param, frac) %>%
+    # mutate(
+    #   percent_difference = case_when(
+    #     !is.infinite(percent_difference) ~ percent_difference,
+    #     is.infinite(percent_difference) ~ 1000000
+    #   )
+    #     ) %>%
+    summarize(spatial_sens = max(abs(percent_difference))) %>%
+    mutate(
+      param = case_when(
+        param %in% c(
+          "unbuffered_banklength", "ripbuf_costs_capital", "ripbuf_frac_max"
+        ) ~
+          "ripbuf_costs_capital, ripbuf_frac_max, and unbuffered_banklength",
+        TRUE ~ param
+      )
+    ) %>%
+    drop_na(),
+  mapping = aes(
+    x = frac,
+    y = abs(spatial_sens),
+    color = param
+  )
+) +
+  geom_rect(
+    inherit.aes = FALSE,
+    mapping = aes(
+      xmin = 0.01, xmax = 100, ymin = 0, ymax = 1
+    ),
+    fill = "grey95"
+  ) +
+  geom_line(show.legend = FALSE, lwd = 1) +
+  # geom_point(size = 3, show.legend = FALSE) +
+  # geom_smooth(se = FALSE, method = "loess", lwd = 2, formula = "y~x") +
+  scale_x_continuous(
+    trans = "log10",
+    name = "Fraction of Original",
+    breaks = c(0.01, 0.1, 1, 10, 100),
+    labels = c("0.01", "0.1", "1", "10", "100")
+  ) +
+  scale_color_brewer(palette = "Set1") +
+  # facet_wrap(facets = c("param", "setmember"), ncol = 4) + #scales = "free_y"
+  # facet_wrap(facets = c("param"), ncol = 4) + #scales = "free_y"
+  scale_y_continuous(
+    trans = "log10",
+    name = "Optimized spending per BMP / default",
+    limits = c(0.001, 1)
+  )
+
+print(space.sens)
+
+# 
+## View Tolerance Range as fractions
+tolerance_ranges <- ggplot(
+  data = tolerance.ranges,
+  mapping = aes(x = tolerance_low, y = tolerance_high, color = param, shape = setmember)
+) +
+  geom_point(size = 5, show.legend = TRUE, alpha = 0.5) +
+  scale_shape_manual(values = setmember_shapes) +
+  labs(
+    title = "Local Sensitivity Parameter Tolerance",
+    color = "Parameter"
+  ) +
+  scale_x_log10(
+    name = "Tolerance Range Low End (as fraction of default value)",
+    lim = c(0.01,1)
+  ) +
+  scale_y_log10(
+    name = "Tolerance Range High End (as fraction of default value)",
+    lim = c(1, 100)
+  ) +
+  geom_hline(yintercept = 1.1, color = "grey", lty = 2) +
+  geom_vline(xintercept = 0.9, color = "grey", lty = 2) +
+  annotate("text", x = 1, y = 1, label = "Highly Sensitive") +
+  annotate("text", x = 0.1, y = 1, label = "Sensitive to Higher Values") +
+  annotate("text", x = 1, y = 10, label = "Sensitive to Lower Values") +
+  annotate("text", x = 0.1, y = 10, label = "Not Sensitive") +
+  facet_wrap("param_source")
+ggsave(
+  plot = tolerance_ranges,
+  filename = paste0(figureoutputs, "ToleranceRanges.png"),
+  width = 16,
+  height = 10,
+  units = "in",
+  limitsize = FALSE
+)
+
+nb.cols <- 16
+mycolors <- colorRampPalette(brewer.pal(8, "Set3"))(nb.cols)
+
+tolerance.zoom <- ggplot(
+  data = tolerance.ranges %>% filter(tolerance_low > 0.9 & tolerance_high < 1.1),
+  mapping = aes(x = tolerance_low, y = tolerance_high, color = param, shape = setmember)
+) +
+  geom_point(size = 5, show.legend = TRUE) +
+  scale_shape_manual(values = setmember_shapes[14:27]) +
+  labs(
+    title = "Local Sensitivity Parameter Tolerance",
+    color = "Parameter"
+  ) +
+  scale_x_log10(
+    name = "Tolerance Range Low End (as fraction of default value)",
+    lim = c(0.8,1)
+  ) +
+  scale_y_log10(
+    name = "Tolerance Range High End (as fraction of default value)",
+    lim = c(1, 1.2)
+  ) +
+  geom_hline(yintercept = 1.1, color = "grey", lty = 2) +
+  geom_vline(xintercept = 0.9, color = "grey", lty = 2) +
+  annotate("text", x = 1, y = 1.07, label = "Highly Sensitive") +
+  annotate("text", x = 0.8, y = 1, label = "Sensitive to Higher Values") +
+  annotate("text", x = 1, y = 1.2, label = "Sensitive to Lower Values") +
+  annotate("text", x = 0.8, y = 1.2, label = "Not Sensitive") +
+  facet_wrap("param_source") +
+  scale_color_manual(values = mycolors)
+
+ggsave(
+  plot = tolerance.zoom,
+  filename = paste0(figureoutputs, "ToleranceRanges_zoomed.png"),
+  width = 16,
+  height = 10,
+  units = "in",
+  limitsize = FALSE
+)
+```
+
+
+
+## Save output
+```{r write output}
+write_csv(tolerance.ranges, file = paste0(figureoutputs, "ToleranceRanges.csv"))
+
+write_csv(
+  tolerance.ranges %>%
+    filter(param_source == "User Supplied") %>%
+    select(param, setmember, lowendtolerance, highendtolerance) %>%
+    rename(
+      Parameter = param, 
+      `Set member (BMP or other)` = setmember,
+      `Tolerance to decreased values` = lowendtolerance,
+      `Tolerance to increased values` = highendtolerance
+    ),
+  file = paste0(figureoutputs, "UserGuide_table5-1.csv")
+)
+
+write_csv(
+  tolerance.ranges %>%
+    filter(param_source == "Provided Data") %>%
+    select(param, setmember, lowendtolerance, highendtolerance) %>%
+    rename(
+      Parameter = param, 
+      `Set member (BMP or other)` = setmember,
+      `Tolerance to decreased values` = lowendtolerance,
+      `Tolerance to increased values` = highendtolerance
+    ),
+  file = paste0(figureoutputs, "UserGuide_table5-2.csv")
+)
+
+ggsave(
+  plot = cost.sens,
+  filename = paste0(figureoutputs, "Fig3a.pdf"),
+  width = 6,
+  height = 6,
+  units = "in",
+  limitsize = FALSE,
+  useDingbats = FALSE
+)
+
+ggsave(
+  plot = space.sens,
+  filename = paste0(figureoutputs, "Fig3b.pdf"),
+  width = 6,
+  height = 3,
+  units = "in",
+  limitsize = FALSE,
+  useDingbats = FALSE
+)
+```
+
+## Fit model curves to the loads_lim_N1 parameter sensitivity
+```{r}
+
+loads_lim_N1model <- with(
+  all.costs %>% filter(param == "./SensitivityAnalysis/NEOSResults/NEOSresult_loads_lim_N1"), lm(cost_sens ~ log(frac))
+)
+
+bee <- all.costs %>% 
+  filter(
+    # param_source == "Provided Data",
+    param %in% c(
+      "loads_lim_N1"
+    )
+  )%>%
+  ungroup() %>%
+  group_by(param, frac) %>%
+  summarize(cost_sens = mean(cost_sens)) %>%
+  ungroup() %>%
+add_row(
+  param = "loads_lim_N1",
+  frac = c(1.006, 1.007, 1.008, 1.009),
+  cost_sens = exp(exp(predict.lm(
+    loads_lim_N1model, data.frame(frac = c(1.006, 1.007, 1.008, 1.009)
+    ))
+  ))
+)
+
+ggplot(bee, aes(x = frac, y = cost_sens)) + 
+  geom_point() + 
+  scale_x_continuous(trans = "logit")
+```
+

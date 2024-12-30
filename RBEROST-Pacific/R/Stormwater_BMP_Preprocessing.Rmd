@@ -1,0 +1,45 @@
+---
+title: "00_Urban_BMP_Preprocessing"
+author: "Kelly-Anne Moffa"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup
+
+
+
+```{r setup}
+packages <- c(
+  "sf", "sp", "dplyr", "data.table", "rgdal", "ggplot2", "purrr", "openxlsx", "stringr", "tidyr", "foreign"
+)
+lapply(packages, library, character.only = TRUE)
+
+#* Set working directory to location of "Tier_1_Optimization-SSWR.5.3.2" folder *#
+
+source("./RBEROST-Pacific/R/Optimization_HelperFunctions-Pacific.R")
+
+InPath <- ("./RBEROST-Pacific/Preprocessing/Inputs/")
+
+sf::sf_use_s2(FALSE)
+```
+
+## Calling Urban and Road BMP Preprocessing Files in Order
+
+
+```{r stormwater}
+source("./RBEROST-Pacific/R/00_ProcessStormwaterData_New.R")
+```
+
+```{r cost_effic}
+source("./RBEROST-Pacific/R/00_CostandEffic_Calc.R")
+```
+
+```{r roads}
+source("./RBEROST-Pacific/R/00_road_bmps.R")
+```
+
